@@ -180,8 +180,15 @@ same `browser.theme.update()`. Use this for iterating on `background.js`.
   has the correct absolute path to the helper, and that the helper is
   executable (`ls -l ~/.local/bin/omarchy-firefox-theme-helper`).
 - **Helper crashes mid-session** — `background.js` reconnects with
-  exponential backoff (1s → 60s cap). A fixed helper picks up within a
-  minute, or on the next theme change.
+  exponential backoff (1s → 60s cap), scheduled via `browser.alarms` so
+  the timer survives even if the event page idles out after the disconnect.
+  A fixed helper picks up within a minute, or on the next theme change.
+- **Theme reverts after Firefox relaunch** — extension console should show
+  `[omarchy] connected to native helper` within a second or two of launch.
+  If it doesn't, the MV3 event page isn't waking on startup. The script
+  registers `runtime.onStartup` + `runtime.onInstalled` listeners at module
+  load for exactly this reason; check that those calls still exist
+  unconditionally at the top level of `background.js`.
 - **Wrong shades on light themes** — tune the `_lift()` amounts in
   `helper/colors.py`. The dark/light branch is automatic; the lift factors
   are not theme-aware.
@@ -208,6 +215,16 @@ same `browser.theme.update()`. Use this for iterating on `background.js`.
   may spawn it. The `allowed_extensions` list contains the gecko ID
   (`omarchy-firefox-theme@miyagi.local`), so only this extension can
   connect. The `path` must be absolute; `install.sh` resolves it via `sed`.
+
+**Extension wake-up** (`extension/background.js`):
+- MV3 event pages only run when something wakes them. Three top-level
+  listeners cover the wake cases: `runtime.onStartup` (browser launch),
+  `runtime.onInstalled` (install/update), and `alarms.onAlarm` (reconnect
+  timer, set when the native port disconnects). Without these, the script
+  stays dormant after a Firefox relaunch and the theme never re-applies —
+  Firefox shows whatever static theme `extensions.activeThemeID` names.
+  The native port keeps the page alive *during* a session, which is why
+  the bug shape is "works perfectly until you quit Firefox."
 
 **Color mapping** (`helper/colors.py`):
 - Pure-stdlib palette → Firefox slot translation. Importable and

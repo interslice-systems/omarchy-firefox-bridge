@@ -2,6 +2,14 @@
 // payloads and applies them via browser.theme.update(). Reconnects with
 // exponential backoff (1s → 60s) so a recovered helper picks up within a
 // minute without spinning if the helper is missing entirely.
+//
+// MV3 event-page lifecycle: runtime.onStartup wakes the page on Firefox
+// launch; runtime.onInstalled wakes it on install/update; alarms.onAlarm
+// wakes it when the reconnect timer fires. Without these listeners, the
+// page can stay dormant when we need it — after a browser relaunch (no
+// onStartup) or after a helper disconnect that lets the page idle out
+// before a setTimeout fires (no alarm). We use browser.alarms instead of
+// setTimeout for that reason: alarms survive event-page unloads.
 
 const HOST_NAME = "omarchy_firefox_theme";
 const MAX_BACKOFF_MS = 60_000;
@@ -23,11 +31,12 @@ function handleDisconnect() {
 }
 
 function scheduleReconnect() {
-  setTimeout(connect, backoffMs);
+  browser.alarms.create("reconnect", { delayInMinutes: backoffMs / 60_000 });
   backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
 }
 
 function connect() {
+  if (port) return;
   try {
     port = browser.runtime.connectNative(HOST_NAME);
   } catch (e) {
@@ -41,4 +50,9 @@ function connect() {
   console.info("[omarchy] connected to native helper");
 }
 
+browser.runtime.onStartup.addListener(connect);
+browser.runtime.onInstalled.addListener(connect);
+browser.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "reconnect") connect();
+});
 connect();
