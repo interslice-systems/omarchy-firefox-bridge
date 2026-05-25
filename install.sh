@@ -30,30 +30,7 @@ if (( ${#missing[@]} > 0 )); then
     exit 1
 fi
 
-# --- Sign extension if needed ---
-FORCE_REBUILD=0
-for arg in "$@"; do
-    [[ "$arg" == "--rebuild" ]] && FORCE_REBUILD=1
-done
-
-shopt -s nullglob
-xpis=( "$EXT_DIR/web-ext-artifacts"/*.xpi )
-if (( FORCE_REBUILD || ${#xpis[@]} == 0 )); then
-    if [[ -z "${WEB_EXT_API_KEY:-}" || -z "${WEB_EXT_API_SECRET:-}" ]]; then
-        echo "WEB_EXT_API_KEY / WEB_EXT_API_SECRET not set." >&2
-        echo "  Generate keys at https://addons.mozilla.org/developers/addon/api/key/" >&2
-        echo "  Then export them and re-run this installer." >&2
-        exit 1
-    fi
-    rm -f "$EXT_DIR/web-ext-artifacts"/*.xpi 2>/dev/null || true
-    ( cd "$EXT_DIR" && web-ext sign \
-        --channel=unlisted \
-        --api-key="$WEB_EXT_API_KEY" \
-        --api-secret="$WEB_EXT_API_SECRET" )
-    xpis=( "$EXT_DIR/web-ext-artifacts"/*.xpi )
-fi
-
-# --- Symlink helper into PATH ---
+# --- Symlink helper into PATH (cheap, idempotent — do first so a slow/failed sign doesn't block these) ---
 mkdir -p "$(dirname "$HELPER_DEST")"
 ln -sfn "$HELPER_SRC" "$HELPER_DEST"
 chmod +x "$HELPER_SRC"
@@ -70,18 +47,47 @@ ln -sfn "$HOOK_SRC" "$HOOK_DEST"
 chmod +x "$HOOK_SRC"
 echo "Linked hook: $HOOK_DEST -> $HOOK_SRC"
 
+# --- Sign extension if needed (slow — may block on AMO manual review for nativeMessaging extensions) ---
+FORCE_REBUILD=0
+for arg in "$@"; do
+    [[ "$arg" == "--rebuild" ]] && FORCE_REBUILD=1
+done
+
+shopt -s nullglob
+xpis=( "$EXT_DIR/web-ext-artifacts"/*.xpi )
+if (( FORCE_REBUILD || ${#xpis[@]} == 0 )); then
+    if [[ -z "${WEB_EXT_API_KEY:-}" || -z "${WEB_EXT_API_SECRET:-}" ]]; then
+        echo "WEB_EXT_API_KEY / WEB_EXT_API_SECRET not set." >&2
+        echo "  Generate keys at https://addons.mozilla.org/developers/addon/api/key/" >&2
+        echo "  Then export them and re-run this installer." >&2
+        exit 1
+    fi
+    rm -f "$EXT_DIR/web-ext-artifacts"/*.xpi 2>/dev/null || true
+    echo "Signing extension via AMO (may wait on manual review for nativeMessaging extensions — Ctrl-C is safe; the submission stays in AMO's queue and you can install the signed XPI later)…"
+    ( cd "$EXT_DIR" && web-ext sign \
+        --channel=unlisted \
+        --api-key="$WEB_EXT_API_KEY" \
+        --api-secret="$WEB_EXT_API_SECRET" )
+    xpis=( "$EXT_DIR/web-ext-artifacts"/*.xpi )
+fi
+
 # --- Final manual step ---
 XPI="${xpis[0]:-}"
 cat <<EOF
 
-Done. One manual step remains:
+Done.
+
+Next: install the signed XPI in Firefox.
   1. Open Firefox → about:addons
   2. Click the gear icon → "Install Add-on From File…"
-  3. Pick: ${XPI:-"<no signed XPI yet — re-run with --rebuild and creds set>"}
+  3. Pick: ${XPI:-"<no signed XPI yet — waiting on AMO review, or re-run later>"}
 
-After installing, switch themes with 'omarchy theme set <name>' and Firefox
-chrome should repaint live.
+While you wait on AMO review you can verify the system end-to-end by loading
+the extension as a temporary add-on:
+  about:debugging → This Firefox → Load Temporary Add-on…
+  → pick: $EXT_DIR/manifest.json
+(Lasts until Firefox restart; bypasses signing entirely.)
 
-Helper logs: about:debugging → This Firefox → Inspect on the extension → Console
-Hook breadcrumb: cat ~/.local/state/omarchy-firefox-theme/last-hook
+Helper logs:  about:debugging → This Firefox → Inspect on the extension → Console
+Hook fired:   cat ~/.local/state/omarchy-firefox-theme/last-hook
 EOF
