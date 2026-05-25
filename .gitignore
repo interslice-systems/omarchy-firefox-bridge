@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+extension/web-ext-artifacts/
+node_modules/

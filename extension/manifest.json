@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Omarchy Firefox Theme Sync",
+  "version": "1.0.0",
+  "description": "Live-syncs Firefox chrome colors with the current Omarchy desktop theme.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omarchy-firefox-theme@miyagi.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": ["theme", "nativeMessaging"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  }
+}

@@ -1,0 +1,12 @@
+#!/bin/bash
+# Debug breadcrumb for the Firefox color sync chain. The Python helper sees
+# theme changes via inotify on ~/.config/omarchy/current/; this hook just
+# records that omarchy-hook fired, so we can tell "hook didn't run" apart from
+# "helper didn't see the change". Inspect with:
+#   cat ~/.local/state/omarchy-firefox-theme/last-hook
+
+set -euo pipefail
+
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-firefox-theme/last-hook"
+mkdir -p "$(dirname "$LOG")"
+printf '%s\t%s\n' "$(date -Is)" "${1:-unknown}" > "$LOG"
