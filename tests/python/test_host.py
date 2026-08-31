@@ -3,12 +3,20 @@ import queue
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from omarchy_firefox_bridge.host import NativeBridge, native_reader  # noqa: E402
+from omarchy_firefox_bridge.host import (  # noqa: E402
+    EXTENSION_TIMEOUT,
+    NativeBridge,
+    main,
+    native_reader,
+)
+from omarchy_firefox_bridge.protocol import validate_snapshot  # noqa: E402
 
 
 class RecordingWriter:
@@ -56,6 +64,54 @@ class NativeBridgeTest(unittest.TestCase):
         completer.join(timeout=1)
         self.assertEqual(response, {"ok": True, "tabs": [tab()]})
         self.assertEqual(self.bridge.snapshot_ids, frozenset({(4, 7)}))
+
+    def test_older_request_cannot_replace_a_newer_installed_snapshot(self):
+        older_validating = threading.Event()
+        release_older = threading.Event()
+        results = {}
+
+        def delayed_validation(value):
+            if value[0]["tabId"] == 7:
+                older_validating.set()
+                release_older.wait(timeout=1)
+            return validate_snapshot(value)
+
+        workers = {
+            label: threading.Thread(
+                target=lambda label=label: results.setdefault(
+                    label, self.bridge.handle_client({"action": "tabs"})
+                )
+            )
+            for label in ("older", "newer")
+        }
+        with patch(
+            "omarchy_firefox_bridge.host.validate_snapshot",
+            side_effect=delayed_validation,
+        ):
+            workers["older"].start()
+            older_request = self.writer.messages.get(timeout=1)
+            self.bridge.receive({
+                "type": "tabs.result",
+                "requestId": older_request["requestId"],
+                "tabs": [tab(tab_id=7)],
+            })
+            self.assertTrue(older_validating.wait(timeout=1))
+
+            workers["newer"].start()
+            newer_request = self.writer.messages.get(timeout=1)
+            self.bridge.receive({
+                "type": "tabs.result",
+                "requestId": newer_request["requestId"],
+                "tabs": [tab(tab_id=8)],
+            })
+            workers["newer"].join(timeout=1)
+            self.assertFalse(workers["newer"].is_alive())
+
+            release_older.set()
+            workers["older"].join(timeout=1)
+            self.assertFalse(workers["older"].is_alive())
+
+        self.assertEqual(self.bridge.snapshot_ids, frozenset({(4, 8)}))
 
     def test_activation_requires_latest_snapshot_and_extension_confirmation(self):
         self.bridge.snapshot_ids = frozenset({(4, 7)})
@@ -105,6 +161,18 @@ class NativeBridgeTest(unittest.TestCase):
         completer.join(timeout=1)
         self.assertEqual(self.bridge.snapshot_ids, frozenset({(4, 7)}))
 
+    def test_no_response_uses_exact_wait_and_returns_within_client_budget(self):
+        self.assertEqual(EXTENSION_TIMEOUT, 0.4)
+        started = time.monotonic()
+        response = self.bridge.handle_client({"action": "tabs"})
+        elapsed = time.monotonic() - started
+
+        request = self.writer.messages.get_nowait()
+        self.assertEqual(request["type"], "tabs.list")
+        self.assertEqual(response, {"ok": False, "error": "timeout"})
+        self.assertGreaterEqual(elapsed, EXTENSION_TIMEOUT)
+        self.assertLess(elapsed, 0.5)
+
     def test_invalid_client_actions_never_reach_native_messaging(self):
         for request in (
             {},
@@ -122,7 +190,7 @@ class NativeBridgeTest(unittest.TestCase):
         request_id = "duplicate-response"
         response_queue = queue.Queue(maxsize=1)
         response_queue.put({"type": "tabs.result", "requestId": request_id, "tabs": []})
-        self.bridge.pending[request_id] = response_queue
+        self.bridge.pending[request_id] = (1, response_queue)
         receiver = threading.Thread(
             target=self.bridge.receive,
             args=({"type": "tabs.result", "requestId": request_id, "tabs": []},),
@@ -154,8 +222,48 @@ class NativeBridgeTest(unittest.TestCase):
         for worker in workers:
             worker.join(timeout=1)
             self.assertFalse(worker.is_alive())
-        self.assertEqual(results["first"]["label"], "first")
-        self.assertEqual(results["second"]["label"], "second")
+        self.assertEqual(results["first"][1]["label"], "first")
+        self.assertEqual(results["second"][1]["label"], "second")
+
+    def test_pending_request_ids_retry_collisions_without_overwriting(self):
+        results = {}
+
+        def make_request(label):
+            try:
+                results[label] = self.bridge.request({"type": "probe", "label": label})
+            except ConnectionError:
+                results[label] = "unavailable"
+
+        workers = {
+            label: threading.Thread(target=make_request, args=(label,))
+            for label in ("first", "second")
+        }
+        with patch(
+            "omarchy_firefox_bridge.host.secrets.token_hex",
+            side_effect=("same-token", "same-token", "different-token"),
+        ):
+            workers["first"].start()
+            first_request = self.writer.messages.get(timeout=1)
+            workers["second"].start()
+            second_request = self.writer.messages.get(timeout=1)
+
+        distinct = first_request["requestId"] != second_request["requestId"]
+        if distinct:
+            for request in (first_request, second_request):
+                self.bridge.receive({
+                    "type": "probe.result",
+                    "requestId": request["requestId"],
+                    "label": request["label"],
+                })
+        else:
+            self.bridge.disconnect()
+        for worker in workers.values():
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+
+        self.assertTrue(distinct)
+        self.assertEqual(results["first"][1]["label"], "first")
+        self.assertEqual(results["second"][1]["label"], "second")
 
     def test_native_eof_releases_pending_request_and_closes_server(self):
         class RecordingServer:
@@ -180,6 +288,111 @@ class NativeBridgeTest(unittest.TestCase):
         self.assertEqual(result["response"], {"ok": False, "error": "unavailable"})
         self.assertTrue(stop.is_set())
         self.assertTrue(server.closed)
+
+
+class NativeHostStartupTest(unittest.TestCase):
+    class RecordingServer:
+        def __init__(self, _directory, handler):
+            self.handler = handler
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def serve_forever(self, _stop):
+            raise AssertionError("startup failure must not enter the server loop")
+
+    def test_watcher_start_failure_cleans_up_started_reader_and_server(self):
+        reader_started = threading.Event()
+        reader_stopped = threading.Event()
+        watcher_started = threading.Event()
+        server = None
+
+        def fake_reader(_stream, _bridge, stop, _server):
+            reader_started.set()
+            stop.wait(timeout=0.2)
+            reader_stopped.set()
+
+        def fake_watcher(_stop, _changed):
+            watcher_started.set()
+
+        def make_server(directory, handler):
+            nonlocal server
+            server = self.RecordingServer(directory, handler)
+            return server
+
+        real_start = threading.Thread.start
+
+        def fail_watcher_start(thread):
+            if thread._target is fake_watcher:
+                raise RuntimeError("watcher start failed")
+            return real_start(thread)
+
+        with (
+            patch("omarchy_firefox_bridge.host.NativeWriter", return_value=RecordingWriter()),
+            patch("omarchy_firefox_bridge.host.runtime_directory", return_value=Path("/tmp")),
+            patch("omarchy_firefox_bridge.host.BridgeSocketServer", side_effect=make_server),
+            patch("omarchy_firefox_bridge.host.native_reader", new=fake_reader),
+            patch("omarchy_firefox_bridge.host.watch_theme", new=fake_watcher),
+            patch.object(threading.Thread, "start", new=fail_watcher_start),
+            self.assertRaisesRegex(RuntimeError, "watcher start failed"),
+        ):
+            main()
+
+        self.assertTrue(reader_started.is_set())
+        self.assertTrue(reader_stopped.wait(timeout=0.1))
+        self.assertFalse(watcher_started.is_set())
+        self.assertIsNotNone(server)
+        self.assertTrue(server.closed)
+        self.assertFalse(server.handler.__self__.connected)
+
+    def test_initial_theme_send_failure_stops_both_threads_and_closes_server(self):
+        reader_started = threading.Event()
+        reader_stopped = threading.Event()
+        watcher_started = threading.Event()
+        watcher_stopped = threading.Event()
+        server = None
+
+        class FailingWriter:
+            def send(self, _message):
+                raise RuntimeError("initial theme send failed")
+
+        def fake_reader(_stream, _bridge, stop, _server):
+            reader_started.set()
+            stop.wait(timeout=0.2)
+            reader_stopped.set()
+
+        def fake_watcher(stop, _changed):
+            watcher_started.set()
+            stop.wait(timeout=0.2)
+            watcher_stopped.set()
+
+        def make_server(directory, handler):
+            nonlocal server
+            server = self.RecordingServer(directory, handler)
+            return server
+
+        with (
+            patch("omarchy_firefox_bridge.host.NativeWriter", return_value=FailingWriter()),
+            patch("omarchy_firefox_bridge.host.runtime_directory", return_value=Path("/tmp")),
+            patch("omarchy_firefox_bridge.host.BridgeSocketServer", side_effect=make_server),
+            patch("omarchy_firefox_bridge.host.native_reader", new=fake_reader),
+            patch("omarchy_firefox_bridge.host.watch_theme", new=fake_watcher),
+            patch(
+                "omarchy_firefox_bridge.host.read_theme_message",
+                return_value={"type": "theme", "theme": {}},
+            ),
+            self.assertRaisesRegex(RuntimeError, "initial theme send failed"),
+        ):
+            main()
+
+        self.assertTrue(reader_started.is_set())
+        self.assertTrue(watcher_started.is_set())
+        self.assertTrue(reader_stopped.wait(timeout=0.1))
+        self.assertTrue(watcher_stopped.wait(timeout=0.1))
+        self.assertIsNotNone(server)
+        self.assertTrue(server.closed)
+        self.assertFalse(server.handler.__self__.connected)
 
 
 if __name__ == "__main__":

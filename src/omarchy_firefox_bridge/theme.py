@@ -64,10 +64,13 @@ def watch_theme(
                 deadline = None
                 changed()
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        finally:
+            process.stdout.close()

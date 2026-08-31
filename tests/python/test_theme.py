@@ -16,6 +16,31 @@ from omarchy_firefox_bridge.theme import (  # noqa: E402
 )
 
 
+class RecordingStream:
+    def __init__(self, stream):
+        self.stream = stream
+        self.events = 0
+        self.final_event = None
+
+    @property
+    def closed(self):
+        return self.stream.closed
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    def readline(self):
+        line = self.stream.readline()
+        if line.rstrip("\n").endswith(" theme"):
+            self.events += 1
+            if self.events == 2:
+                self.final_event = time.monotonic()
+        return line
+
+    def close(self):
+        self.stream.close()
+
+
 class ThemeTest(unittest.TestCase):
     def test_uses_only_the_omarchy_4_state_path(self):
         self.assertEqual(
@@ -69,10 +94,13 @@ class ThemeTest(unittest.TestCase):
             watcher.join(timeout=1)
             self.assertFalse(watcher.is_alive())
             self.assertIsNotNone(child.poll())
+            self.assertTrue(child.stdout.closed)
         finally:
             if child.poll() is None:
                 child.kill()
                 child.wait()
+            if child.stdout is not None and not child.stdout.closed:
+                child.stdout.close()
 
     def test_watcher_uses_trailing_edge_debounce_for_event_bursts(self):
         stop = threading.Event()
@@ -89,24 +117,32 @@ class ThemeTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             text=True,
         )
+        child.stdout = RecordingStream(child.stdout)
         changes = []
-        started = time.monotonic()
         watcher = threading.Thread(
             target=watch_theme,
-            args=(stop, lambda: changes.append(time.monotonic()), lambda *args, **kwargs: child),
+            args=(
+                stop,
+                lambda: changes.append(time.monotonic()),
+                lambda *args, **kwargs: child,
+            ),
         )
         try:
             watcher.start()
             watcher.join(timeout=1)
             self.assertFalse(watcher.is_alive())
             self.assertEqual(len(changes), 1)
-            self.assertGreaterEqual(changes[0] - started, 0.15)
-            self.assertLess(changes[0] - started, 0.35)
+            self.assertIsNotNone(child.stdout.final_event)
+            self.assertGreaterEqual(changes[0] - child.stdout.final_event, 0.15)
+            self.assertLess(changes[0] - child.stdout.final_event, 0.3)
+            self.assertTrue(child.stdout.closed)
         finally:
             stop.set()
             if child.poll() is None:
                 child.kill()
             child.wait()
+            if child.stdout is not None and not child.stdout.closed:
+                child.stdout.close()
 
 
 if __name__ == "__main__":
