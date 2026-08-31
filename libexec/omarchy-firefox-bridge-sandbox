@@ -7,7 +7,6 @@ set -euo pipefail
 lib_root=${OMARCHY_FIREFOX_BRIDGE_LIB_ROOT:-$HOME/.local/lib/omarchy-firefox-bridge}
 app_src=$lib_root/src
 current=$HOME/.local/state/omarchy/current
-runtime=$XDG_RUNTIME_DIR/omarchy-firefox-bridge
 module=${1:-omarchy_firefox_bridge.host}
 
 if (( $# > 0 )); then
@@ -16,7 +15,23 @@ fi
 
 [[ -d $app_src ]] || { printf 'bridge source missing: %s\n' "$app_src" >&2; exit 1; }
 [[ -d $current ]] || { printf 'Omarchy 4 current theme missing: %s\n' "$current" >&2; exit 1; }
-install -d -m 700 "$runtime"
+runtime=$(
+  PYTHONPATH=$app_src /usr/bin/python3 - <<'PY'
+import os
+
+from omarchy_firefox_bridge.socket_server import (
+    _open_application_directory,
+    runtime_directory,
+)
+
+directory = runtime_directory()
+descriptor = _open_application_directory(directory)
+try:
+    print(directory)
+finally:
+    os.close(descriptor)
+PY
+)
 
 exec /usr/bin/bwrap \
   --die-with-parent \

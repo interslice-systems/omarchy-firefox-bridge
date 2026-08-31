@@ -3,8 +3,8 @@ set -euo pipefail
 
 lib_root=${OMARCHY_FIREFOX_BRIDGE_LIB_ROOT:-$HOME/.local/lib/omarchy-firefox-bridge}
 
-case ${1:-} in
-  tabs|activate)
+case $#:${1:-} in
+  1:tabs|3:activate)
     export PYTHONPATH=$lib_root/src
     exec /usr/bin/python3 -m omarchy_firefox_bridge.client "$@"
     ;;
