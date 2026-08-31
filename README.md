@@ -75,11 +75,21 @@ The lock directory is mode `0700` and the lock file is `0600`. While holding
 that lock, the installer validates mutable destinations, stages every
 replacement beside its destination, swaps the complete product as one
 transaction, asks Omarchy to install the hook, and verifies the exact installed
-inventory, contents, ownership, and modes. Any failure or interruption before
-commit restores the prior active and legacy entries, directory modes, and
-newly created parents; the persistent lock state remains. A successful commit
-removes transaction backups, staging entries, and the three known legacy
-installation entries.
+inventory, contents, ownership, and modes.
+Handled failures and `SIGINT` or `SIGTERM` before commit trigger in-process rollback
+of prior active and legacy entries, directory modes, and newly created parents;
+the persistent lock state remains. A successful commit removes transaction
+backups, staging entries, and the three known legacy installation entries.
+
+`SIGKILL`, power loss, or a machine crash cannot run that rollback. If one
+occurs during publication, an active entry may be absent and hidden entries
+containing `.stage.` or `.backup.` may remain beside their destinations. A
+blind rerun installs the current product but does not restore the exact previous
+tree or remove that debris. First confirm the interrupted installer is no
+longer running, inspect the active and hidden entries in the destination
+parents listed above, and preserve or restore any backup needed for recovery.
+Then rerun `./install.sh`, confirm it succeeds and the active inventory is
+complete, and only then remove confirmed stale stage or backup entries.
 
 It does not install packages, contact AMO, use signing credentials, or install
 an XPI.
@@ -173,8 +183,8 @@ marked incognito. It queries only `{windowType: "normal"}`.
 ## Native Protocol
 
 Native messages use a four-byte little-endian length followed by UTF-8 JSON.
-Responses larger than 2 MiB are rejected. Request IDs are 1-64 printable ASCII
-characters.
+The JSON body is capped at 1 MiB from helper to extension and 2 MiB from
+extension to helper. Request IDs are 1-64 printable ASCII characters.
 
 Helper to extension:
 
@@ -189,6 +199,9 @@ Extension to helper:
 {"type":"tabs.result","requestId":"32-hex-characters","tabs":[]}
 {"type":"tabs.activated","requestId":"32-hex-characters","ok":true}
 ```
+
+After sending `tabs.list` or `tabs.activate`, the helper waits up to 400 ms for
+the correlated extension response.
 
 Activation is allowed only for an ID pair in the latest successful snapshot.
 The extension then re-reads that tab, verifies its current window, and calls
@@ -205,7 +218,7 @@ $XDG_RUNTIME_DIR/omarchy-firefox-bridge/bridge.sock
 
 The directory is mode `0700`; the socket is mode `0600`. Each connection sends
 one newline-terminated JSON request and receives one newline-terminated JSON
-response.
+response. A request is capped at 4,096 bytes including its terminating newline.
 
 ```bash
 omarchy-firefox-bridge tabs
@@ -233,8 +246,9 @@ Responses:
 
 Exit `0` means success, `2` means invalid CLI input, and `3` means the bridge
 was unavailable or rejected the operation. Missing sockets fail immediately;
-a connected but silent host times out within 500ms. The CLI always writes one
-compact JSON object and never logs tab payloads.
+after connecting, the CLI has one 500 ms deadline for sending its request and
+receiving the complete response. The CLI always writes one compact JSON object
+and never logs tab payloads.
 
 ## Automated Verification
 
@@ -335,7 +349,8 @@ the version change, and then sign.
 |---|---|
 | Extension or helper absent | CLI returns `unavailable`; desktop caller keeps its Firefox window fallback |
 | Connected helper does not answer | CLI returns `timeout` within 500ms |
-| Native response is malformed or over 2 MiB | Snapshot is rejected; previous ID allowlist remains |
+| Malformed or oversized extension-to-helper native frame | Host disconnects and closes the local service; a fresh host starts with an empty activation allowlist and requires a new snapshot |
+| Correctly framed native response carries a correlated protocol-invalid payload | Request returns `bridge-error`; previous activation allowlist remains |
 | Tab moved or closed after snapshot | Activation fails; no URL is opened |
 | Favicon is missing or unsafe | Empty favicon field; caller uses packaged fallback |
 | Omarchy palette is absent or malformed | Theme push is skipped; host remains available |
