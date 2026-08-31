@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+lib_root=${OMARCHY_FIREFOX_BRIDGE_LIB_ROOT:-$HOME/.local/lib/omarchy-firefox-bridge}
+
+case ${1:-} in
+  tabs|activate)
+    export PYTHONPATH=$lib_root/src
+    exec /usr/bin/python3 -m omarchy_firefox_bridge.client "$@"
+    ;;
+  *)
+    exec "$lib_root/libexec/omarchy-firefox-bridge-sandbox" \
+      omarchy_firefox_bridge.host
+    ;;
+esac

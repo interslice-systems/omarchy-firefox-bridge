@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${HOME:?HOME is required}"
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
+
+lib_root=${OMARCHY_FIREFOX_BRIDGE_LIB_ROOT:-$HOME/.local/lib/omarchy-firefox-bridge}
+app_src=$lib_root/src
+current=$HOME/.local/state/omarchy/current
+runtime=$XDG_RUNTIME_DIR/omarchy-firefox-bridge
+module=${1:-omarchy_firefox_bridge.host}
+
+if (( $# > 0 )); then
+  shift
+fi
+
+[[ -d $app_src ]] || { printf 'bridge source missing: %s\n' "$app_src" >&2; exit 1; }
+[[ -d $current ]] || { printf 'Omarchy 4 current theme missing: %s\n' "$current" >&2; exit 1; }
+install -d -m 700 "$runtime"
+
+exec /usr/bin/bwrap \
+  --die-with-parent \
+  --new-session \
+  --unshare-all \
+  --unshare-user \
+  --disable-userns \
+  --clearenv \
+  --setenv HOME "$HOME" \
+  --setenv PATH /usr/bin \
+  --setenv PYTHONPATH /app \
+  --setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_DIR" \
+  --ro-bind /usr /usr \
+  --symlink usr/lib /lib \
+  --symlink usr/lib /lib64 \
+  --symlink usr/bin /bin \
+  --symlink usr/bin /sbin \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp \
+  --dir /home \
+  --dir "$HOME" \
+  --dir "$HOME/.local" \
+  --dir "$HOME/.local/state" \
+  --dir "$HOME/.local/state/omarchy" \
+  --dir /run \
+  --dir /run/user \
+  --dir "$XDG_RUNTIME_DIR" \
+  --ro-bind "$current" "$current" \
+  --ro-bind "$app_src" /app \
+  --bind "$runtime" "$runtime" \
+  --chdir /app \
+  -- \
+  /usr/bin/python3 -m "$module" "$@"
