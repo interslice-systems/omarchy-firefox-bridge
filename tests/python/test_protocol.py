@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 import sys
 import unittest
@@ -56,6 +57,33 @@ class ProtocolTest(unittest.TestCase):
         for field in ("url", "pendingUrl", "cookieStoreId"):
             with self.subTest(field=field), self.assertRaises(ProtocolError):
                 validate_snapshot([tab(**{field: "secret"})])
+
+    def test_rejects_missing_projected_field(self):
+        value = tab()
+        del value["favicon"]
+        with self.assertRaises(ProtocolError):
+            validate_snapshot([value])
+
+    def test_accepts_explicit_empty_snapshot(self):
+        original = []
+        validated = validate_snapshot(original)
+        self.assertEqual(validated, [])
+        self.assertIsNot(validated, original)
+
+    def test_bounds_astral_unicode_by_code_point(self):
+        accepted = "😀" * 1024
+        self.assertEqual(validate_snapshot([tab(title=accepted)])[0]["title"], accepted)
+        with self.assertRaises(ProtocolError):
+            validate_snapshot([tab(title="😀" * 1025)])
+
+    def test_bounds_favicon_by_decoded_bytes(self):
+        accepted = "data:image/png;base64," + base64.b64encode(b"x" * 65536).decode()
+        rejected = "data:image/png;base64," + base64.b64encode(b"x" * 65537).decode()
+        self.assertEqual(
+            validate_snapshot([tab(favicon=accepted)])[0]["favicon"], accepted
+        )
+        with self.assertRaisesRegex(ProtocolError, "exceeds 65536 decoded bytes"):
+            validate_snapshot([tab(favicon=rejected)])
 
     def test_rejects_invalid_types_lengths_and_favicon(self):
         cases = [

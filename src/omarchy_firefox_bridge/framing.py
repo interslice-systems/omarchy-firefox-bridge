@@ -15,6 +15,10 @@ class FrameError(ValueError):
     """A native frame is malformed or outside the bridge bounds."""
 
 
+def _reject_json_constant(constant: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {constant}")
+
+
 def read_exact(stream: BinaryIO, size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = size
@@ -32,6 +36,8 @@ def read_message(
     max_bytes: int = MAX_NATIVE_RESPONSE_BYTES,
 ) -> dict:
     header = read_exact(stream, 4)
+    if not header:
+        raise EOFError("native stream closed between frames")
     if len(header) != 4:
         raise FrameError("short native header")
     (size,) = struct.unpack("<I", header)
@@ -41,8 +47,8 @@ def read_message(
     if len(body) != size:
         raise FrameError("short native body")
     try:
-        value = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        value = json.loads(body.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError) as error:
         raise FrameError("invalid native JSON") from error
     if not isinstance(value, dict):
         raise FrameError("native message must be an object")
@@ -50,11 +56,15 @@ def read_message(
 
 
 def encode_message(message: dict, max_bytes: int = MAX_NATIVE_REQUEST_BYTES) -> bytes:
-    body = json.dumps(
-        message,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        body = json.dumps(
+            message,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except ValueError as error:
+        raise FrameError("invalid native JSON") from error
     if len(body) > max_bytes:
         raise FrameError(f"native body exceeds {max_bytes} bytes")
     return struct.pack("<I", len(body)) + body
@@ -70,5 +80,15 @@ class NativeWriter:
     def send(self, message: dict) -> None:
         frame = encode_message(message)
         with self.lock:
-            self.stream.write(frame)
+            remaining = memoryview(frame)
+            while remaining:
+                written = self.stream.write(remaining)
+                if (
+                    isinstance(written, bool)
+                    or not isinstance(written, int)
+                    or written <= 0
+                    or written > len(remaining)
+                ):
+                    raise FrameError("native write made no progress")
+                remaining = remaining[written:]
             self.stream.flush()
