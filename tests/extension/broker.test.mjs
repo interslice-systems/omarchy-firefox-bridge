@@ -7,6 +7,10 @@ const source = await readFile(
   new URL("../../extension/broker.js", import.meta.url),
   "utf8",
 ).catch(() => "");
+const backgroundSource = await readFile(
+  new URL("../../extension/background.js", import.meta.url),
+  "utf8",
+).catch(() => "");
 
 function loadBroker() {
   const context = { atob, URL };
@@ -53,6 +57,15 @@ test("projects, bounds, filters, and sorts tabs", () => {
     },
   ]);
 
+  assert.deepEqual(Object.keys(projected[0]), [
+    "tabId",
+    "windowId",
+    "index",
+    "title",
+    "displayUrl",
+    "favicon",
+    "active",
+  ]);
   assert.deepEqual(JSON.parse(JSON.stringify(projected)), [
     {
       tabId: 3,
@@ -124,6 +137,17 @@ test("rejects malformed, duplicate, and ambiguous snapshots", () => {
   );
 });
 
+test("filters malformed private records before validation and accepts empty snapshots", () => {
+  const broker = loadBroker();
+  assert.equal(broker.projectTabs([]).length, 0);
+  assert.equal(
+    broker.projectTabs([
+      { id: 0, windowId: 0, index: -1, active: false, incognito: true },
+    ]).length,
+    0,
+  );
+});
+
 test("redacts payload-bearing and unknown URL schemes", () => {
   const broker = loadBroker();
   assert.equal(broker.displayUrl("about:newtab"), "about:newtab");
@@ -145,7 +169,9 @@ test("accepts bounded raster favicons and rejects unsafe variants", () => {
   assert.equal(broker.safeFavicon("data:image/png;base64,YQ"), "");
   assert.equal(broker.safeFavicon("data:image/png;charset=utf-8;base64,cG5n"), "");
   assert.equal(broker.safeFavicon("data:image/png;base64,not base64"), "");
+  const maximum = `data:image/png;base64,${Buffer.alloc(65536).toString("base64")}`;
   const oversized = `data:image/png;base64,${Buffer.alloc(65537).toString("base64")}`;
+  assert.equal(broker.safeFavicon(maximum), maximum);
   assert.equal(broker.safeFavicon(oversized), "");
 });
 
@@ -174,6 +200,25 @@ test("lists only normal projected tabs", async () => {
       requestId: "request-1",
       tabs: [{ tabId: 7, windowId: 4, index: 0, title: "A", displayUrl: "a.test/", favicon: "", active: true }],
     },
+  ]);
+});
+
+test("returns an empty list result when querying or projecting fails", async () => {
+  const broker = loadBroker();
+  const responses = [];
+  await broker.handleNativeMessage(
+    { type: "tabs.list", requestId: "query-failure" },
+    { tabs: { query: async () => { throw new Error("query failed"); } } },
+    (message) => responses.push(message),
+  );
+  await broker.handleNativeMessage(
+    { type: "tabs.list", requestId: "projection-failure" },
+    { tabs: { query: async () => [{ id: 0, windowId: 1, index: 0, active: true }] } },
+    (message) => responses.push(message),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.result", requestId: "query-failure", tabs: [] },
+    { type: "tabs.result", requestId: "projection-failure", tabs: [] },
   ]);
 });
 
@@ -252,4 +297,85 @@ test("retains theme updates and rejects malformed request IDs", async () => {
     false,
   );
   assert.deepEqual(JSON.parse(JSON.stringify(themes)), [{ colors: { frame: "#000000" } }]);
+});
+
+test("discards work and disconnects from stale native ports", async () => {
+  function event() {
+    let listener;
+    return {
+      addListener(candidate) {
+        listener = candidate;
+      },
+      emit(...args) {
+        return listener(...args);
+      },
+    };
+  }
+
+  function makePort() {
+    const messages = [];
+    return {
+      error: null,
+      messages,
+      onMessage: event(),
+      onDisconnect: event(),
+      postMessage(message) {
+        messages.push(JSON.parse(JSON.stringify(message)));
+      },
+    };
+  }
+
+  let resolveOperation;
+  const operation = new Promise((resolve) => {
+    resolveOperation = resolve;
+  });
+  const ports = [makePort(), makePort(), makePort(), makePort()];
+  const alarms = [];
+  let connections = 0;
+  const alarmEvent = event();
+  const browser = {
+    alarms: {
+      create: (_name, alarm) => alarms.push(JSON.parse(JSON.stringify(alarm))),
+      onAlarm: alarmEvent,
+    },
+    runtime: {
+      connectNative: () => ports[connections++],
+      lastError: null,
+      onInstalled: event(),
+      onStartup: event(),
+    },
+  };
+  const broker = {
+    handleNativeMessage: async (_message, _browser, respond) => {
+      await operation;
+      respond({ type: "tabs.result", requestId: "stale", tabs: [] });
+      return true;
+    },
+  };
+  const context = {
+    browser,
+    console: { error() {}, info() {}, warn() {} },
+    OmarchyBridgeBroker: broker,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(backgroundSource, context, { filename: "background.js" });
+
+  const pending = ports[0].onMessage.emit({ type: "tabs.list", requestId: "stale" });
+  ports[0].onDisconnect.emit();
+  alarmEvent.emit({ name: "reconnect" });
+  resolveOperation();
+  await pending;
+
+  assert.deepEqual(ports[1].messages, []);
+  ports[1].onDisconnect.emit();
+  assert.deepEqual(alarms, [
+    { delayInMinutes: 1_000 / 60_000 },
+    { delayInMinutes: 2_000 / 60_000 },
+  ]);
+
+  alarmEvent.emit({ name: "reconnect" });
+  ports[1].onDisconnect.emit();
+  assert.equal(alarms.length, 2);
+  alarmEvent.emit({ name: "reconnect" });
+  assert.equal(connections, 3);
 });

@@ -10,21 +10,24 @@ function scheduleReconnect() {
   backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
 }
 
-function handleDisconnect() {
-  const error = port?.error || browser.runtime.lastError;
+function handleDisconnect(sourcePort) {
+  if (port !== sourcePort) return;
+  const error = sourcePort.error || browser.runtime.lastError;
   console.warn("[omarchy-firefox-bridge] native port disconnected", error);
   port = null;
   scheduleReconnect();
 }
 
-async function handleMessage(message) {
+async function handleMessage(sourcePort, message) {
   try {
     const handled = await OmarchyBridgeBroker.handleNativeMessage(
       message,
       browser,
-      (response) => port?.postMessage(response),
+      (response) => {
+        if (port === sourcePort) sourcePort.postMessage(response);
+      },
     );
-    if (handled) backoffMs = 1_000;
+    if (handled && port === sourcePort) backoffMs = 1_000;
   } catch (error) {
     console.error("[omarchy-firefox-bridge] broker operation failed", error);
   }
@@ -39,8 +42,9 @@ function connect() {
     scheduleReconnect();
     return;
   }
-  port.onMessage.addListener(handleMessage);
-  port.onDisconnect.addListener(handleDisconnect);
+  const connectedPort = port;
+  connectedPort.onMessage.addListener((message) => handleMessage(connectedPort, message));
+  connectedPort.onDisconnect.addListener(() => handleDisconnect(connectedPort));
   console.info("[omarchy-firefox-bridge] connected to native helper");
 }
 
