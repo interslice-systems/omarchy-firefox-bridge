@@ -5,10 +5,36 @@ import json
 from pathlib import Path
 import socket
 import sys
+import time
 
 from .socket_server import runtime_directory
 
 CLIENT_TIMEOUT = 0.5
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+BRIDGE_ERROR = {"ok": False, "error": "bridge-error"}
+UNAVAILABLE = {"ok": False, "error": "unavailable"}
+TIMEOUT = {"ok": False, "error": "timeout"}
+INVALID_REQUEST = {"ok": False, "error": "invalid-request"}
+
+
+def _reject_json_constant(constant: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {constant}")
+
+
+def _encode(response: dict) -> str:
+    return json.dumps(
+        response,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise socket.timeout("bridge response deadline expired")
+    return remaining
 
 
 def request(
@@ -17,36 +43,70 @@ def request(
     timeout: float = CLIENT_TIMEOUT,
 ) -> dict:
     message = message or {"action": "tabs"}
-    encoded = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(timeout)
     try:
+        encoded = _encode(message).encode("utf-8") + b"\n"
+    except Exception:
+        return BRIDGE_ERROR.copy()
+
+    client = None
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
         client.connect(str(path))
+        deadline = time.monotonic() + timeout
+        client.settimeout(_remaining(deadline))
         client.sendall(encoded)
         client.shutdown(socket.SHUT_WR)
-        raw = client.makefile("rb").readline(2 * 1024 * 1024 + 1)
-        if not raw.endswith(b"\n") or len(raw) > 2 * 1024 * 1024:
-            return {"ok": False, "error": "bridge-error"}
-        response = json.loads(raw.decode("utf-8"))
-        return response if isinstance(response, dict) else {"ok": False, "error": "bridge-error"}
-    except FileNotFoundError:
-        return {"ok": False, "error": "unavailable"}
-    except (ConnectionRefusedError, OSError) as error:
-        if isinstance(error, socket.timeout):
-            return {"ok": False, "error": "timeout"}
-        return {"ok": False, "error": "unavailable"}
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return {"ok": False, "error": "bridge-error"}
+
+        received = bytearray()
+        while True:
+            client.settimeout(_remaining(deadline))
+            chunk = client.recv(MAX_RESPONSE_BYTES + 1 - len(received))
+            if not chunk:
+                return BRIDGE_ERROR.copy()
+            received.extend(chunk)
+            newline = received.find(b"\n")
+            if newline >= 0:
+                raw = bytes(received[: newline + 1])
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    return BRIDGE_ERROR.copy()
+                break
+            if len(received) > MAX_RESPONSE_BYTES:
+                return BRIDGE_ERROR.copy()
+
+        response = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+        return response if isinstance(response, dict) else BRIDGE_ERROR.copy()
+    except socket.timeout:
+        return TIMEOUT.copy()
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        return UNAVAILABLE.copy()
+    except Exception:
+        return BRIDGE_ERROR.copy()
     finally:
-        client.close()
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _ascii_decimal(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and all("0" <= character <= "9" for character in value)
+    )
 
 
 def parse_command(argv: list[str]) -> dict:
     if argv == ["tabs"]:
         return {"action": "tabs"}
     if len(argv) == 3 and argv[0] == "activate":
-        if not argv[1].isdigit() or not argv[2].isdigit():
-            raise ValueError("IDs must be decimal integers")
+        if not _ascii_decimal(argv[1]) or not _ascii_decimal(argv[2]):
+            raise ValueError("IDs must be ASCII decimal integers")
         window_id = int(argv[1])
         tab_id = int(argv[2])
         if window_id <= 0 or tab_id <= 0:
@@ -55,24 +115,46 @@ def parse_command(argv: list[str]) -> dict:
     raise ValueError("usage: omarchy-firefox-bridge tabs|activate <windowId> <tabId>")
 
 
-def emit(response: dict) -> None:
-    print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
+def emit(response: dict) -> bool:
+    serialized_original = True
+    fallback = _encode(BRIDGE_ERROR)
+    try:
+        encoded = _encode(response)
+    except Exception:
+        encoded = fallback
+        serialized_original = False
+    try:
+        sys.stdout.write(encoded + "\n")
+        sys.stdout.flush()
+    except Exception:
+        if encoded != fallback:
+            try:
+                sys.stdout.write(fallback + "\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+        return False
+    return serialized_original
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        message = parse_command(argv)
-    except ValueError:
-        emit({"ok": False, "error": "invalid-request"})
-        return 2
+        arguments = list(sys.argv[1:] if argv is None else argv)
+        message = parse_command(arguments)
+    except Exception:
+        return 2 if emit(INVALID_REQUEST) else 3
     try:
         path = runtime_directory() / "bridge.sock"
-    except RuntimeError:
-        emit({"ok": False, "error": "unavailable"})
+    except Exception:
+        emit(UNAVAILABLE)
         return 3
-    response = request(path, message)
-    emit(response)
+    try:
+        response = request(path, message)
+    except Exception:
+        response = BRIDGE_ERROR
+    emitted_original = emit(response)
+    if not emitted_original or not isinstance(response, dict):
+        return 3
     return 0 if response.get("ok") is True else 3
 
 
