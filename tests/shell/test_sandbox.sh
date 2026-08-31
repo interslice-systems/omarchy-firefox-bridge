@@ -28,7 +28,10 @@ printf 'must stay hidden' >"$smoke_home/.sandbox-private-sentinel"
 export HOME=$smoke_home
 app_write_probe_candidate=$repo/src/sandbox-write-probe
 persistent_write_probe_candidate=$HOME/.local/state/omarchy/current/bridge-write-probe
-[[ ! -e $app_write_probe_candidate && ! -L $app_write_probe_candidate ]]
+[[ ! -e $app_write_probe_candidate && ! -L $app_write_probe_candidate ]] || {
+  printf 'app write probe already exists: %s\n' "$app_write_probe_candidate" >&2
+  exit 1
+}
 [[ ! -e $persistent_write_probe_candidate && ! -L $persistent_write_probe_candidate ]]
 app_write_probe=$app_write_probe_candidate
 persistent_write_probe=$persistent_write_probe_candidate
@@ -41,16 +44,26 @@ assert_preexisting_app_probe_preserved() {
 
   mkdir -p \
     "$fixture_repo/src" \
+    "$fixture_repo/tests/fixtures" \
     "$fixture_repo/tests/shell" \
     "$fixture_home/.local/state/omarchy/current"
   cp "$repo/tests/shell/test_sandbox.sh" "$copied_test"
+  cp \
+    "$repo/tests/fixtures/dark-colors.toml" \
+    "$fixture_repo/tests/fixtures/dark-colors.toml"
   local sentinel=$fixture_repo/src/sandbox-write-probe
   printf 'preserve-me' >"$sentinel"
 
-  if HOME=$fixture_home bash "$copied_test" >/dev/null 2>&1; then
+  local expected="app write probe already exists: $sentinel"
+  local rejection
+  if rejection=$(HOME=$fixture_home bash "$copied_test" 2>&1); then
     printf 'app probe precondition unexpectedly passed\n' >&2
     return 1
   fi
+  [[ $rejection == "$expected" ]] || {
+    printf 'wrong app probe precondition failure: %s\n' "$rejection" >&2
+    return 1
+  }
   [[ -f $sentinel && $(<"$sentinel") == preserve-me ]] || {
     printf 'cleanup removed pre-existing app probe\n' >&2
     return 1
