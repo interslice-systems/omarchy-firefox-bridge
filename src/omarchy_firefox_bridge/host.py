@@ -1,0 +1,176 @@
+"""Firefox-owned native host coordinating theme and local tab requests."""
+from __future__ import annotations
+
+import queue
+import secrets
+import sys
+import threading
+from typing import BinaryIO
+
+from .framing import FrameError, NativeWriter, read_message
+from .protocol import (
+    ProtocolError,
+    snapshot_ids,
+    valid_request_id,
+    validate_activation,
+    validate_snapshot,
+)
+from .socket_server import BridgeSocketServer, runtime_directory
+from .theme import read_theme_message, watch_theme
+
+EXTENSION_TIMEOUT = 0.4
+
+
+def log(message: str) -> None:
+    print(f"[omarchy-firefox-bridge] {message}", file=sys.stderr, flush=True)
+
+
+class NativeBridge:
+    def __init__(self, writer: NativeWriter, timeout: float = EXTENSION_TIMEOUT) -> None:
+        self.writer = writer
+        self.timeout = timeout
+        self.pending: dict[str, queue.Queue] = {}
+        self.pending_lock = threading.Lock()
+        self.connected = True
+        self.snapshot_ids: frozenset[tuple[int, int]] = frozenset()
+        self.snapshot_lock = threading.Lock()
+
+    def receive(self, message: dict) -> None:
+        request_id = message.get("requestId")
+        if not valid_request_id(request_id):
+            return
+        with self.pending_lock:
+            target = self.pending.get(request_id)
+        if target is not None:
+            try:
+                target.put_nowait(message)
+            except queue.Full:
+                pass
+
+    def disconnect(self) -> None:
+        with self.pending_lock:
+            self.connected = False
+            targets = list(self.pending.values())
+        for target in targets:
+            try:
+                target.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def request(self, message: dict) -> dict | None:
+        request_id = secrets.token_hex(16)
+        response_queue: queue.Queue = queue.Queue(maxsize=1)
+        with self.pending_lock:
+            if not self.connected:
+                raise ConnectionError("native extension disconnected")
+            self.pending[request_id] = response_queue
+        try:
+            self.writer.send({**message, "requestId": request_id})
+            response = response_queue.get(timeout=self.timeout)
+            if response is None:
+                raise ConnectionError("native extension disconnected")
+            return response
+        except queue.Empty:
+            return None
+        finally:
+            with self.pending_lock:
+                self.pending.pop(request_id, None)
+
+    def handle_client(self, request: dict) -> dict:
+        action = request.get("action")
+        if action == "tabs" and frozenset(request) == {"action"}:
+            try:
+                response = self.request({"type": "tabs.list"})
+            except ConnectionError:
+                return {"ok": False, "error": "unavailable"}
+            if response is None:
+                return {"ok": False, "error": "timeout"}
+            try:
+                if response.get("type") != "tabs.result":
+                    raise ProtocolError("wrong response type")
+                tabs = validate_snapshot(response.get("tabs"))
+            except ProtocolError:
+                return {"ok": False, "error": "bridge-error"}
+            with self.snapshot_lock:
+                self.snapshot_ids = snapshot_ids(tabs)
+            return {"ok": True, "tabs": tabs}
+        if action == "activate" and frozenset(request) == {"action", "windowId", "tabId"}:
+            try:
+                window_id, tab_id = validate_activation(request["windowId"], request["tabId"])
+            except ProtocolError:
+                return {"ok": False, "error": "invalid-request"}
+            with self.snapshot_lock:
+                allowed = (window_id, tab_id) in self.snapshot_ids
+            if not allowed:
+                return {"ok": False, "error": "stale-tab"}
+            try:
+                response = self.request(
+                    {"type": "tabs.activate", "windowId": window_id, "tabId": tab_id}
+                )
+            except ConnectionError:
+                return {"ok": False, "error": "unavailable"}
+            if response is None:
+                return {"ok": False, "error": "timeout"}
+            if response.get("type") != "tabs.activated" or response.get("ok") is not True:
+                return {"ok": False, "error": "bridge-error"}
+            return {"ok": True}
+        return {"ok": False, "error": "invalid-request"}
+
+
+def native_reader(
+    stream: BinaryIO,
+    bridge: NativeBridge,
+    stop: threading.Event,
+    server: BridgeSocketServer,
+) -> None:
+    try:
+        while not stop.is_set():
+            bridge.receive(read_message(stream))
+    except (FrameError, EOFError):
+        pass
+    finally:
+        bridge.disconnect()
+        stop.set()
+        server.close()
+
+
+def main() -> int:
+    stop = threading.Event()
+    writer = NativeWriter(sys.stdout.buffer)
+    bridge = NativeBridge(writer)
+    server = BridgeSocketServer(runtime_directory(), bridge.handle_client)
+
+    reader = threading.Thread(
+        target=native_reader,
+        args=(sys.stdin.buffer, bridge, stop, server),
+        daemon=True,
+    )
+    reader.start()
+
+    def push_theme() -> None:
+        message = read_theme_message()
+        if message is not None:
+            writer.send(message)
+
+    watcher = threading.Thread(target=watch_theme, args=(stop, push_theme), daemon=True)
+    watcher.start()
+    push_theme()
+    log("started")
+    try:
+        server.serve_forever(stop)
+    finally:
+        stop.set()
+        server.close()
+        reader.join(timeout=1.5)
+        watcher.join(timeout=1.5)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as error:
+        log(f"fatal {type(error).__name__}")
+        raise SystemExit(1)
