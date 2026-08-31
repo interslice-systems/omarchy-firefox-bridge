@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-firefox-bridge
+install -d -m 700 "$state"
+printf '%s\t%s\n' "$(date -Is)" "${1:-unknown}" > "$state/last-theme-set"
+chmod 600 "$state/last-theme-set"
