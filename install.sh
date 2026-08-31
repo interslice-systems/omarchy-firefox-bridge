@@ -37,6 +37,7 @@ if (( ${#missing[@]} )); then
 fi
 
 "$usr_bin/python3" - "$repo" "$HOME" "$usr_bin" "$testing" <<'PY'
+import errno
 import fcntl
 import json
 import os
@@ -198,6 +199,8 @@ def validate_final_entries():
             or stat.S_ISLNK(info.st_mode)
         ):
             fail(f"unsupported managed destination type: {path}")
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            validate_removable_tree(path)
     for path in legacy.values():
         info = lstat(path)
         if info is None:
@@ -210,7 +213,24 @@ def validate_final_entries():
             fail(f"unsupported legacy destination type: {path}")
 
 
-def ensure_relative_directory(components, final_mode):
+def validate_removable_tree(root):
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        info = lstat(path)
+        if info is None or info.st_uid != expected_uid:
+            fail(f"managed destination tree must be owned by uid {expected_uid}: {path}")
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            continue
+        if stat.S_IMODE(info.st_mode) & 0o700 != 0o700:
+            fail(f"managed destination directory must be owner-accessible: {path}")
+        try:
+            pending.extend(Path(entry.path) for entry in os.scandir(path))
+        except OSError as error:
+            fail(f"managed destination directory cannot be traversed: {path}: {error}")
+
+
+def ensure_relative_directory(components, final_mode, created_paths=None):
     descriptor = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         final_created = False
@@ -220,6 +240,8 @@ def ensure_relative_directory(components, final_mode):
             try:
                 os.mkdir(component, mode, dir_fd=descriptor)
                 created = True
+                if created_paths is not None:
+                    created_paths.append(home.joinpath(*components[:index + 1]))
             except FileExistsError:
                 pass
             child = os.open(
@@ -450,6 +472,20 @@ def cleanup_stages(stages):
         remove_entry(path)
 
 
+def remove_created_directories(paths):
+    errors = []
+    for path in reversed(paths):
+        try:
+            path.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                errors.append(f"{path}: {error}")
+    if errors:
+        raise RuntimeError("created-directory cleanup failed: " + "; ".join(errors))
+
+
 def rollback(states):
     errors = []
     for path, backup in reversed(list(states.values())):
@@ -494,11 +530,12 @@ def install_transaction():
     stages = {}
     states = {}
     mode_changes = []
+    created_parents = []
     committed = False
     previous_handlers = {}
 
     def interrupted(signum, _frame):
-        raise InterruptedError(f"installation interrupted by signal {signum}")
+        raise RuntimeError(f"installation interrupted by signal {signum}")
 
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -506,7 +543,11 @@ def install_transaction():
         validate_existing_components()
         validate_final_entries()
         for components, mode in parent_specs:
-            descriptor, previous_mode, created = ensure_relative_directory(components, mode)
+            descriptor, previous_mode, created = ensure_relative_directory(
+                components,
+                mode,
+                created_parents,
+            )
             if not created and previous_mode != mode and components == (".mozilla", "native-messaging-hosts"):
                 mode_changes.append((home.joinpath(*components), previous_mode))
                 os.fchmod(descriptor, mode)
@@ -532,6 +573,10 @@ def install_transaction():
         stages.pop("manifest")
         maybe_inject("manifest")
 
+        hook_environment = None
+        if testing:
+            hook_environment = os.environ.copy()
+            hook_environment["OMARCHY_FIREFOX_BRIDGE_TEST_INSTALLER_PID"] = str(os.getpid())
         subprocess.run(
             [
                 str(usr_bin / "omarchy"),
@@ -543,6 +588,7 @@ def install_transaction():
             check=True,
             text=True,
             capture_output=True,
+            env=hook_environment,
         )
         maybe_inject("hook")
         verify_install(manifest_bytes)
@@ -569,7 +615,11 @@ def install_transaction():
                         finally:
                             os.close(descriptor)
             finally:
-                cleanup_stages(stages)
+                try:
+                    cleanup_stages(stages)
+                finally:
+                    if not committed:
+                        remove_created_directories(created_parents)
         raise
     finally:
         for signum, handler in previous_handlers.items():

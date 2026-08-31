@@ -189,6 +189,11 @@ destination.parent.mkdir(parents=True, exist_ok=True)
 destination.write_bytes(source.read_bytes())
 destination.chmod(0o755)
 HOOK
+  if [[ ${TEST_HOOK_INTERRUPT:-0} == 1 ]]; then
+    printf 'interrupt %s target %s\n' "$BASHPID" "$OMARCHY_FIREFOX_BRIDGE_TEST_INSTALLER_PID" >> "$TEST_HOOK_LOG"
+    kill -TERM "${OMARCHY_FIREFOX_BRIDGE_TEST_INSTALLER_PID:?}"
+    /usr/bin/sleep 1
+  fi
   printf 'end %s\n' "$BASHPID" >> "$TEST_HOOK_LOG"
 else
   exit 64
@@ -235,7 +240,10 @@ fi
         self.assertEqual(
             result.returncode,
             expected,
-            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            msg=(
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}\n"
+                f"hook log:\n{(self.root / 'hook.log').read_text() if (self.root / 'hook.log').exists() else '<absent>'}"
+            ),
         )
         return result
 
@@ -312,6 +320,18 @@ fi
                 "allowed_extensions": ["omarchy-bridge@interslice.systems"],
             },
         )
+        expected_manifest = (
+            "{\n"
+            '  "name": "omarchy_firefox_bridge",\n'
+            '  "description": "Omarchy Firefox Bridge native host",\n'
+            f'  "path": "{launcher}",\n'
+            '  "type": "stdio",\n'
+            '  "allowed_extensions": [\n'
+            '    "omarchy-bridge@interslice.systems"\n'
+            "  ]\n"
+            "}\n"
+        ).encode()
+        self.assertEqual(manifest_path.read_bytes(), expected_manifest)
         for relative in LEGACY_PATHS:
             path = home / relative
             self.assertFalse(path.exists() or path.is_symlink(), path)
@@ -424,6 +444,71 @@ fi
         self.run_install(home, process_umask=0o077)
 
         self.assert_installed(home)
+
+    def test_restrictive_stale_directories_are_rejected_before_mutation(self):
+        for kind in ("root", "nested"):
+            with self.subTest(kind=kind):
+                home = self.make_home(f"restrictive-stale-{kind}")
+                library = home / ACTIVE_PATHS[0]
+                nested = library / "old/restricted"
+                write_file(nested / "sentinel", "preserve", 0o640)
+                restricted = library if kind == "root" else nested
+                before = snapshot(library)
+                if kind == "root":
+                    before["mode"] = 0o000
+                else:
+                    before["children"]["old"]["children"]["restricted"]["mode"] = 0o000
+                restricted.chmod(0o000)
+                try:
+                    result = self.run_install(home, expected=1)
+                    self.assertNotIn("Local bridge installation complete", result.stdout)
+                    self.assertTrue(library.is_dir() and not library.is_symlink())
+                    restricted_mode = stat.S_IMODE(restricted.lstat().st_mode)
+                    self.assertEqual(restricted_mode, 0o000)
+                    self.assertFalse((home / ".local/state").exists())
+                    self.assert_no_debris(home)
+                    restricted.chmod(0o700)
+                    after = snapshot(library)
+                    if kind == "root":
+                        after["mode"] = restricted_mode
+                    else:
+                        after["children"]["old"]["children"]["restricted"]["mode"] = restricted_mode
+                    self.assertEqual(after, before)
+                finally:
+                    def make_accessible(path):
+                        if not path.exists() or path.is_symlink():
+                            return
+                        if path.is_dir():
+                            path.chmod(0o700)
+                            for child in path.iterdir():
+                                make_accessible(child)
+
+                    make_accessible(home)
+
+    def test_fresh_hook_failure_leaves_only_persistent_lock_state(self):
+        home = self.make_home()
+
+        result = self.run_install(home, expected=1, TEST_HOOK_FAILURE="1")
+
+        self.assertNotIn("Local bridge installation complete", result.stdout)
+        inventory = {
+            str(path.relative_to(home))
+            for path in home.rglob("*")
+        }
+        self.assertEqual(
+            inventory,
+            {
+                ".local",
+                ".local/state",
+                ".local/state/omarchy-firefox-bridge",
+                ".local/state/omarchy-firefox-bridge/install.lock",
+            },
+        )
+        self.assert_regular(
+            home / ".local/state/omarchy-firefox-bridge/install.lock",
+            0o600,
+        )
+        self.assert_no_debris(home)
 
     def test_predictable_manifest_temp_file_directory_and_symlink_are_irrelevant(self):
         for kind in ("file", "directory", "symlink"):
@@ -560,6 +645,7 @@ fi
             {"OMARCHY_FIREFOX_BRIDGE_TEST_FAIL_AFTER": "manifest"},
             {"OMARCHY_FIREFOX_BRIDGE_TEST_FAIL_AFTER": "hook"},
             {"OMARCHY_FIREFOX_BRIDGE_TEST_INTERRUPT_AFTER": "manifest"},
+            {"TEST_HOOK_INTERRUPT": "1"},
             {"TEST_HOOK_FAILURE": "1"},
         )
         for index, injection in enumerate(failures):
