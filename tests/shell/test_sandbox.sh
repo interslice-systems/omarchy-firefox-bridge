@@ -4,18 +4,23 @@ set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 export OMARCHY_FIREFOX_BRIDGE_LIB_ROOT=$repo
 
+cleanup() {
+  if [[ -n ${app_write_probe:-} ]]; then
+    rm -f -- "$app_write_probe"
+  fi
+  if [[ -n ${persistent_write_probe:-} ]]; then
+    rm -f -- "$persistent_write_probe"
+  fi
+  rm -rf -- "$temp_root"
+}
+
 temp_root=$(mktemp -d)
+trap cleanup EXIT
 chmod 700 "$temp_root"
 app_write_probe=$repo/src/sandbox-write-probe
 persistent_write_probe=$HOME/.local/state/omarchy/current/bridge-write-probe
 [[ ! -e $app_write_probe && ! -L $app_write_probe ]]
 [[ ! -e $persistent_write_probe && ! -L $persistent_write_probe ]]
-
-cleanup() {
-  rm -f -- "$app_write_probe" "$persistent_write_probe"
-  rm -rf -- "$temp_root"
-}
-trap cleanup EXIT
 
 runtime_parent=$temp_root/runtime
 mkdir -m 700 "$runtime_parent"
@@ -74,6 +79,51 @@ assert_runtime_rejected() {
   fi
   [[ $rejection == *"$expected"* ]]
 }
+
+hostile_cwd=$temp_root/hostile-cwd
+hostile_marker=$temp_root/hostile-imported
+hostile_parent=$temp_root/hostile-runtime
+mkdir -m 700 \
+  "$hostile_cwd" \
+  "$hostile_cwd/omarchy_firefox_bridge" \
+  "$hostile_parent"
+printf '' >"$hostile_cwd/omarchy_firefox_bridge/__init__.py"
+cat >"$hostile_cwd/omarchy_firefox_bridge/socket_server.py" <<'PY'
+import os
+from pathlib import Path
+
+Path(os.environ["HOSTILE_IMPORT_MARKER"]).write_text("imported")
+
+
+def runtime_directory():
+    return Path(os.environ["XDG_RUNTIME_DIR"]) / "omarchy-firefox-bridge"
+
+
+def _open_application_directory(_directory):
+    return os.open("/dev/null", os.O_RDONLY)
+PY
+printf 'keep' >"$hostile_parent/omarchy-firefox-bridge"
+
+shadow_rejection=
+shadow_status=0
+if shadow_rejection=$(
+  cd "$hostile_cwd" || exit 1
+  HOSTILE_IMPORT_MARKER=$hostile_marker \
+    XDG_RUNTIME_DIR=$hostile_parent \
+    "$repo/libexec/omarchy-firefox-bridge-sandbox" \
+      omarchy_firefox_bridge.sandbox_probe 2>&1
+); then
+  shadow_status=0
+else
+  shadow_status=$?
+fi
+[[ ! -e $hostile_marker ]] || {
+  printf 'hostile current-directory package was imported\n' >&2
+  exit 1
+}
+[[ $shadow_status -ne 0 ]]
+[[ $shadow_rejection == *"bridge runtime path must be an owned real directory"* ]]
+[[ $(<"$hostile_parent/omarchy-firefox-bridge") == keep ]]
 
 symlink_parent=$temp_root/symlink-runtime
 symlink_target=$temp_root/symlink-target

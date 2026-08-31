@@ -16,7 +16,7 @@ fi
 [[ -d $app_src ]] || { printf 'bridge source missing: %s\n' "$app_src" >&2; exit 1; }
 [[ -d $current ]] || { printf 'Omarchy 4 current theme missing: %s\n' "$current" >&2; exit 1; }
 runtime=$(
-  PYTHONPATH=$app_src /usr/bin/python3 - <<'PY'
+  PYTHONPATH=$app_src /usr/bin/python3 -P - <<'PY'
 import os
 
 from omarchy_firefox_bridge.socket_server import (
