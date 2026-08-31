@@ -1,0 +1,5 @@
+background = "#fafafa"
+foreground = "#1a1a1a"
+accent = "#0066cc"
+selection_background = "#cce4ff"
+selection_foreground = "#1a1a1a"

@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+node_modules/
 extension/web-ext-artifacts/
 extension/.amo-upload-uuid
-node_modules/
+*.xpi

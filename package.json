@@ -1,0 +1,14 @@
+{
+  "name": "omarchy-firefox-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:python": "PYTHONPATH=src python3 -m unittest discover -s tests/python -v",
+    "test:extension": "node --test tests/extension/*.test.mjs",
+    "lint:extension": "web-ext lint --source-dir extension --warnings-as-errors"
+  },
+  "devDependencies": {
+    "web-ext": "10.6.0"
+  }
+}

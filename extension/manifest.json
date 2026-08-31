@@ -1,20 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "Omarchy Color Sync",
-  "version": "1.0.2",
-  "description": "Live-syncs browser chrome colors with the current Omarchy desktop theme.",
+  "name": "Omarchy Bridge",
+  "version": "1.0.0",
+  "description": "Bridges the Omarchy desktop theme and local Firefox tabs.",
+  "incognito": "not_allowed",
   "browser_specific_settings": {
     "gecko": {
-      "id": "omarchy-firefox-theme@miyagi.local",
+      "id": "omarchy-bridge@interslice.systems",
       "strict_min_version": "142.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": ["websiteContent", "browsingActivity"]
       }
     }
   },
-  "permissions": ["theme", "nativeMessaging", "alarms"],
+  "permissions": ["theme", "nativeMessaging", "alarms", "tabs"],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": ["broker.js", "background.js"]
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; connect-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'"
   },
   "icons": {
     "48": "icons/icon-48.png",
