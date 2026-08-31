@@ -18,6 +18,14 @@ cleanup() {
 temp_root=$(mktemp -d)
 trap cleanup EXIT
 chmod 700 "$temp_root"
+smoke_home=$temp_root/home
+mkdir -p "$smoke_home/.local/state/omarchy/current/theme"
+chmod 700 "$smoke_home"
+cp \
+  "$repo/tests/fixtures/dark-colors.toml" \
+  "$smoke_home/.local/state/omarchy/current/theme/colors.toml"
+printf 'must stay hidden' >"$smoke_home/.sandbox-private-sentinel"
+export HOME=$smoke_home
 app_write_probe_candidate=$repo/src/sandbox-write-probe
 persistent_write_probe_candidate=$HOME/.local/state/omarchy/current/bridge-write-probe
 [[ ! -e $app_write_probe_candidate && ! -L $app_write_probe_candidate ]]
@@ -25,47 +33,35 @@ persistent_write_probe_candidate=$HOME/.local/state/omarchy/current/bridge-write
 app_write_probe=$app_write_probe_candidate
 persistent_write_probe=$persistent_write_probe_candidate
 
-assert_preexisting_probe_preserved() {
-  local kind=$1
-  local fixture=$temp_root/cleanup-$kind
+assert_preexisting_app_probe_preserved() {
+  local fixture=$temp_root/cleanup-app
   local fixture_repo=$fixture/repo
   local fixture_home=$fixture/home
   local copied_test=$fixture_repo/tests/shell/test_sandbox.sh
-  local sentinel
 
   mkdir -p \
     "$fixture_repo/src" \
     "$fixture_repo/tests/shell" \
     "$fixture_home/.local/state/omarchy/current"
   cp "$repo/tests/shell/test_sandbox.sh" "$copied_test"
-  case $kind in
-    app)
-      sentinel=$fixture_repo/src/sandbox-write-probe
-      ;;
-    persistent)
-      sentinel=$fixture_home/.local/state/omarchy/current/bridge-write-probe
-      ;;
-  esac
+  local sentinel=$fixture_repo/src/sandbox-write-probe
   printf 'preserve-me' >"$sentinel"
 
   if HOME=$fixture_home bash "$copied_test" >/dev/null 2>&1; then
-    printf 'probe precondition unexpectedly passed: %s\n' "$kind" >&2
+    printf 'app probe precondition unexpectedly passed\n' >&2
     return 1
   fi
   [[ -f $sentinel && $(<"$sentinel") == preserve-me ]] || {
-    printf 'cleanup removed pre-existing %s probe\n' "$kind" >&2
+    printf 'cleanup removed pre-existing app probe\n' >&2
     return 1
   }
 }
 
-assert_preexisting_probe_preserved app
-assert_preexisting_probe_preserved persistent
+assert_preexisting_app_probe_preserved
 
 runtime_parent=$temp_root/runtime
 mkdir -m 700 "$runtime_parent"
 export XDG_RUNTIME_DIR=$runtime_parent
-
-[[ -e $HOME/.ssh ]]
 
 fake_root=$temp_root/fake-root
 mkdir -p "$fake_root/src/omarchy_firefox_bridge" "$fake_root/libexec"
@@ -104,6 +100,29 @@ assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' activate
 assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' activate one
 assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' activate one two three
 assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' unknown
+
+cli_hostile_cwd=$temp_root/cli-hostile-cwd
+cli_hostile_marker=$temp_root/cli-hostile-imported
+mkdir -p "$cli_hostile_cwd/omarchy_firefox_bridge"
+printf '' >"$cli_hostile_cwd/omarchy_firefox_bridge/__init__.py"
+cat >"$cli_hostile_cwd/omarchy_firefox_bridge/client.py" <<'PY'
+import os
+from pathlib import Path
+
+Path(os.environ["HOSTILE_IMPORT_MARKER"]).write_text("imported")
+print("hostile")
+PY
+cli_output=$(
+  cd "$cli_hostile_cwd"
+  HOSTILE_IMPORT_MARKER=$cli_hostile_marker \
+    OMARCHY_FIREFOX_BRIDGE_LIB_ROOT=$fake_root \
+    "$repo/bin/omarchy-firefox-bridge" tabs
+)
+[[ ! -e $cli_hostile_marker ]] || {
+  printf 'public CLI imported a hostile current-directory package\n' >&2
+  exit 1
+}
+[[ $cli_output == 'client:["tabs"]' ]]
 
 assert_runtime_rejected() {
   local parent=$1

@@ -12,10 +12,16 @@ const backgroundSource = await readFile(
   "utf8",
 ).catch(() => "");
 
-function loadBroker() {
+function loadBrokerContext() {
   const context = { atob, URL };
   context.globalThis = context;
-  vm.runInNewContext(source, context, { filename: "broker.js" });
+  vm.createContext(context);
+  vm.runInContext(source, context, { filename: "broker.js" });
+  return context;
+}
+
+function loadBroker() {
+  const context = loadBrokerContext();
   return context.OmarchyBridgeBroker;
 }
 
@@ -107,6 +113,39 @@ test("bounds Unicode by code point", () => {
   assert.equal([...tab.displayUrl].length, 4096);
 });
 
+test("stops title iteration as soon as the code-point limit is reached", () => {
+  const context = loadBrokerContext();
+  vm.runInContext(
+    `
+      const originalIterator = String.prototype[Symbol.iterator];
+      String.prototype[Symbol.iterator] = function guardedIterator() {
+        const iterator = originalIterator.call(this);
+        let reads = 0;
+        return {
+          next() {
+            reads += 1;
+            if (reads > 1024) throw new Error("title iterator exhausted past limit");
+            return iterator.next();
+          },
+        };
+      };
+    `,
+    context,
+  );
+
+  assert.equal(
+    context.OmarchyBridgeBroker.boundedString("x".repeat(1_000_000), 1024),
+    "x".repeat(1024),
+  );
+});
+
+test("rejects oversized URLs before parsing website-controlled input", () => {
+  const broker = loadBroker();
+  const oversized = `https://example.com/${"x".repeat(1_000_000)}`;
+
+  assert.equal(broker.displayUrl(oversized), "");
+});
+
 test("rejects malformed, duplicate, and ambiguous snapshots", () => {
   const broker = loadBroker();
   const valid = {
@@ -173,6 +212,21 @@ test("accepts bounded raster favicons and rejects unsafe variants", () => {
   const oversized = `data:image/png;base64,${Buffer.alloc(65537).toString("base64")}`;
   assert.equal(broker.safeFavicon(maximum), maximum);
   assert.equal(broker.safeFavicon(oversized), "");
+});
+
+test("rejects impossible-size favicons before regular-expression processing", () => {
+  const context = loadBrokerContext();
+  vm.runInContext(
+    `
+      RegExp.prototype.exec = function guardedExec() {
+        throw new Error("favicon regex processed impossible-size input");
+      };
+    `,
+    context,
+  );
+  const impossible = `data:image/png;base64,${"A".repeat(1_000_000)}`;
+
+  assert.equal(context.OmarchyBridgeBroker.safeFavicon(impossible), "");
 });
 
 test("lists only normal projected tabs", async () => {

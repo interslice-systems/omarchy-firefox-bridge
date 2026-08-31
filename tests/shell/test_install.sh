@@ -226,11 +226,11 @@ fi
                 environment[key] = str(value)
         return environment
 
-    def run_install(self, home, *, expected=0, repo=None, process_umask=None, **updates):
+    def run_install(self, home, *, expected=0, repo=None, process_umask=None, cwd=None, **updates):
         fixture_repo = repo or self.fixture_repo
         result = subprocess.run(
             ["/usr/bin/bash", str(fixture_repo / "install.sh")],
-            cwd=self.root,
+            cwd=cwd or self.root,
             env=self.environment(home, **updates),
             text=True,
             capture_output=True,
@@ -246,6 +246,26 @@ fi
             ),
         )
         return result
+
+    def make_hostile_cwd(self, name, marker):
+        hostile = self.root / name
+        hostile.mkdir()
+        write_file(
+            hostile / "secrets.py",
+            """from pathlib import Path
+import os
+
+Path(os.environ["HOSTILE_IMPORT_MARKER"]).write_text("imported")
+counter = 0
+
+
+def token_hex(length=32):
+    global counter
+    counter += 1
+    return f"{counter:0{length * 2}x}"
+""",
+        )
+        return hostile
 
     def assert_regular(self, path, mode, expected_bytes=None):
         kind, actual_mode, owner = metadata(path)
@@ -667,6 +687,48 @@ fi
         source = self.fixture_repo.joinpath("install.sh").read_text()
         self.assertIn('usr_bin=/usr/bin', source)
         self.assertIn('OMARCHY_FIREFOX_BRIDGE_INSTALL_TESTING', source)
+
+    def test_installer_ignores_hostile_current_directory_modules(self):
+        home = self.make_home()
+        marker = self.root / "hostile-installer-imported"
+        hostile = self.make_hostile_cwd("hostile-installer-cwd", marker)
+
+        self.run_install(
+            home,
+            cwd=hostile,
+            HOSTILE_IMPORT_MARKER=marker,
+        )
+
+        self.assertFalse(marker.exists(), marker)
+        self.assert_installed(home)
+
+    def test_hook_ignores_hostile_current_directory_modules(self):
+        home = self.make_home()
+        state = self.root / "hook-state"
+        state.mkdir(mode=0o700)
+        marker = self.root / "hostile-hook-imported"
+        hostile = self.make_hostile_cwd("hostile-hook-cwd", marker)
+
+        result = subprocess.run(
+            [str(self.fixture_repo / "hooks/omarchy-firefox-bridge"), "safe"],
+            cwd=hostile,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "XDG_STATE_HOME": str(state),
+                "HOSTILE_IMPORT_MARKER": str(marker),
+            },
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists(), marker)
+        self.assertIn(
+            "\tsafe\n",
+            (state / "omarchy-firefox-bridge/last-theme-set").read_text(),
+        )
 
     def test_publication_hook_and_interruption_failures_restore_exact_prior_tree(self):
         failures = (

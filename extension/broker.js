@@ -3,6 +3,7 @@
 
   const TITLE_LIMIT = 1024;
   const URL_LIMIT = 4096;
+  const URL_INPUT_LIMIT = URL_LIMIT * 2;
   const FAVICON_LIMIT = 64 * 1024;
   const RASTER_TYPES = new Set([
     "image/png",
@@ -14,9 +15,19 @@
     "image/x-icon",
     "image/vnd.microsoft.icon",
   ]);
+  const FAVICON_BASE64_LIMIT = Math.ceil(FAVICON_LIMIT / 3) * 4;
+  const FAVICON_DATA_URL_LIMIT =
+    "data:image/vnd.microsoft.icon;base64,".length + FAVICON_BASE64_LIMIT;
 
   function boundedString(value, limit) {
-    return [...String(value ?? "")].slice(0, limit).join("");
+    const output = [];
+    const iterator = String(value ?? "")[Symbol.iterator]();
+    while (output.length < limit) {
+      const next = iterator.next();
+      if (next.done) break;
+      output.push(next.value);
+    }
+    return output.join("");
   }
 
   function validRequestId(value) {
@@ -25,7 +36,9 @@
 
   function displayUrl(value) {
     try {
-      const parsed = new URL(String(value ?? ""));
+      const raw = String(value ?? "");
+      if (boundedString(raw, URL_INPUT_LIMIT) !== raw) return "";
+      const parsed = new URL(raw);
       const suffix = `${parsed.pathname}${parsed.search}${parsed.hash}`;
       let rendered;
       if (parsed.protocol === "http:" || parsed.protocol === "https:") {
@@ -43,10 +56,11 @@
 
   function safeFavicon(value) {
     if (typeof value !== "string") return "";
+    if (value.length > FAVICON_DATA_URL_LIMIT) return "";
     const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(value);
     if (!match || !RASTER_TYPES.has(match[1].toLowerCase())) return "";
     if (match[2].length === 0 || match[2].length % 4 !== 0) return "";
-    if (match[2].length > Math.ceil(FAVICON_LIMIT / 3) * 4) return "";
+    if (match[2].length > FAVICON_BASE64_LIMIT) return "";
     try {
       return atob(match[2]).length <= FAVICON_LIMIT ? value : "";
     } catch (_error) {

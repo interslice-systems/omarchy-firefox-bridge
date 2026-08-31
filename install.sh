@@ -36,7 +36,7 @@ if (( ${#missing[@]} )); then
   exit 1
 fi
 
-"$usr_bin/python3" - "$repo" "$HOME" "$usr_bin" "$testing" <<'PY'
+"$usr_bin/python3" -P - "$repo" "$HOME" "$usr_bin" "$testing" <<'PY'
 import errno
 import fcntl
 import json

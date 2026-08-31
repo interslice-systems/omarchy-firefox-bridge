@@ -69,7 +69,7 @@ def main() -> int:
                 "appWriteBlocked": write_blocked(app_probe),
                 "colorsReadable": colors.is_file() and bool(colors.read_bytes()),
                 "environmentCleared": SENTINEL not in os.environ,
-                "homeHidden": not (home / ".ssh").exists(),
+                "homeHidden": not (home / ".sandbox-private-sentinel").exists(),
                 "interfacesIsolated": interfaces_isolated(),
                 "networkBlocked": blocked_network(),
                 "networkNamespace": os.readlink("/proc/self/ns/net"),

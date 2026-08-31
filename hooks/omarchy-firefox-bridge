@@ -7,7 +7,7 @@ else
   state_root=${HOME:-}/.local/state
 fi
 
-/usr/bin/python3 - "$state_root" "${1:-unknown}" <<'PY'
+/usr/bin/python3 -P - "$state_root" "${1:-unknown}" <<'PY'
 from datetime import datetime
 import os
 from pathlib import Path
