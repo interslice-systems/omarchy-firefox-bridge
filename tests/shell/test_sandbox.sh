@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 export OMARCHY_FIREFOX_BRIDGE_LIB_ROOT=$repo
+unset app_write_probe persistent_write_probe
 
 cleanup() {
   if [[ -n ${app_write_probe:-} ]]; then
@@ -17,10 +18,48 @@ cleanup() {
 temp_root=$(mktemp -d)
 trap cleanup EXIT
 chmod 700 "$temp_root"
-app_write_probe=$repo/src/sandbox-write-probe
-persistent_write_probe=$HOME/.local/state/omarchy/current/bridge-write-probe
-[[ ! -e $app_write_probe && ! -L $app_write_probe ]]
-[[ ! -e $persistent_write_probe && ! -L $persistent_write_probe ]]
+app_write_probe_candidate=$repo/src/sandbox-write-probe
+persistent_write_probe_candidate=$HOME/.local/state/omarchy/current/bridge-write-probe
+[[ ! -e $app_write_probe_candidate && ! -L $app_write_probe_candidate ]]
+[[ ! -e $persistent_write_probe_candidate && ! -L $persistent_write_probe_candidate ]]
+app_write_probe=$app_write_probe_candidate
+persistent_write_probe=$persistent_write_probe_candidate
+
+assert_preexisting_probe_preserved() {
+  local kind=$1
+  local fixture=$temp_root/cleanup-$kind
+  local fixture_repo=$fixture/repo
+  local fixture_home=$fixture/home
+  local copied_test=$fixture_repo/tests/shell/test_sandbox.sh
+  local sentinel
+
+  mkdir -p \
+    "$fixture_repo/src" \
+    "$fixture_repo/tests/shell" \
+    "$fixture_home/.local/state/omarchy/current"
+  cp "$repo/tests/shell/test_sandbox.sh" "$copied_test"
+  case $kind in
+    app)
+      sentinel=$fixture_repo/src/sandbox-write-probe
+      ;;
+    persistent)
+      sentinel=$fixture_home/.local/state/omarchy/current/bridge-write-probe
+      ;;
+  esac
+  printf 'preserve-me' >"$sentinel"
+
+  if HOME=$fixture_home bash "$copied_test" >/dev/null 2>&1; then
+    printf 'probe precondition unexpectedly passed: %s\n' "$kind" >&2
+    return 1
+  fi
+  [[ -f $sentinel && $(<"$sentinel") == preserve-me ]] || {
+    printf 'cleanup removed pre-existing %s probe\n' "$kind" >&2
+    return 1
+  }
+}
+
+assert_preexisting_probe_preserved app
+assert_preexisting_probe_preserved persistent
 
 runtime_parent=$temp_root/runtime
 mkdir -m 700 "$runtime_parent"
