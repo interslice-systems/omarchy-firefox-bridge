@@ -1,7 +1,100 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-firefox-bridge
-install -d -m 700 "$state"
-printf '%s\t%s\n' "$(date -Is)" "${1:-unknown}" > "$state/last-theme-set"
-chmod 600 "$state/last-theme-set"
+if [[ ${XDG_STATE_HOME+x} ]]; then
+  state_root=$XDG_STATE_HOME
+else
+  state_root=${HOME:-}/.local/state
+fi
+
+/usr/bin/python3 - "$state_root" "${1:-unknown}" <<'PY'
+from datetime import datetime
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+
+state_root = Path(sys.argv[1])
+theme = sys.argv[2]
+uid = os.geteuid()
+
+if not state_root.is_absolute() or state_root == Path("/"):
+    raise SystemExit(f"state root must be an absolute non-root path: {state_root}")
+try:
+    root_info = state_root.lstat()
+except FileNotFoundError:
+    raise SystemExit(f"state root does not exist: {state_root}") from None
+if (
+    not stat.S_ISDIR(root_info.st_mode)
+    or stat.S_ISLNK(root_info.st_mode)
+    or root_info.st_uid != uid
+    or Path(os.path.realpath(state_root)) != state_root
+):
+    raise SystemExit(f"state root must be a real owned directory: {state_root}")
+
+root_descriptor = os.open(
+    state_root,
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+)
+application_descriptor = None
+temporary_name = None
+try:
+    try:
+        os.mkdir("omarchy-firefox-bridge", 0o700, dir_fd=root_descriptor)
+    except FileExistsError:
+        pass
+    application_descriptor = os.open(
+        "omarchy-firefox-bridge",
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=root_descriptor,
+    )
+    application_info = os.fstat(application_descriptor)
+    if not stat.S_ISDIR(application_info.st_mode) or application_info.st_uid != uid:
+        raise SystemExit("bridge state directory must be an owned real directory")
+    os.fchmod(application_descriptor, 0o700)
+
+    payload = (
+        f"{datetime.now().astimezone().isoformat(timespec='seconds')}\t{theme}\n"
+    ).encode()
+    while True:
+        temporary_name = f".last-theme-set.stage.{os.getpid()}.{secrets.token_hex(8)}"
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=application_descriptor,
+            )
+            break
+        except FileExistsError:
+            continue
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("breadcrumb write made no progress")
+            view = view[written:]
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(
+        temporary_name,
+        "last-theme-set",
+        src_dir_fd=application_descriptor,
+        dst_dir_fd=application_descriptor,
+    )
+    temporary_name = None
+finally:
+    if temporary_name is not None and application_descriptor is not None:
+        try:
+            os.unlink(temporary_name, dir_fd=application_descriptor)
+        except FileNotFoundError:
+            pass
+    if application_descriptor is not None:
+        os.close(application_descriptor)
+    os.close(root_descriptor)
+PY
