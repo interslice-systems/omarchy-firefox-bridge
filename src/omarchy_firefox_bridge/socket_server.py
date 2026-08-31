@@ -17,7 +17,6 @@ SOCKET_NAME = "bridge.sock"
 MAX_CLIENT_REQUEST = 4096
 MAX_CLIENT_WORKERS = 8
 CLIENT_READ_TIMEOUT = 0.5
-HANDLER_TIMEOUT = 0.4
 SHUTDOWN_TIMEOUT = 0.5
 INVALID_REQUEST = {"ok": False, "error": "invalid-request"}
 BRIDGE_ERROR = {"ok": False, "error": "bridge-error"}
@@ -142,10 +141,12 @@ class BridgeSocketServer:
     this filesystem threat boundary because they can mutate owned directories,
     ptrace the process, and race any pathname operation.
 
-    Handlers must return a dict within 400 ms. Python cannot safely cancel an
-    arbitrary callback, so at most eight daemon workers are admitted and close
-    waits one aggregate 500 ms budget. A violating handler cannot block process
-    exit, but may remain alive until it returns.
+    Handlers must return a dict. The production host may spend up to 400 ms
+    waiting for the extension and must complete the callback within the client's
+    total 500 ms connected-response budget under normal scheduling. Python cannot
+    safely cancel an arbitrary callback, so at most eight daemon workers are
+    admitted and close waits one aggregate 500 ms budget. A violating handler
+    cannot block process exit, but may remain alive until it returns.
     """
 
     def __init__(self, directory: Path, handler: Callable[[dict], dict]) -> None:
