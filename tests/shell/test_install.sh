@@ -465,7 +465,28 @@ fi
                     self.assertTrue(library.is_dir() and not library.is_symlink())
                     restricted_mode = stat.S_IMODE(restricted.lstat().st_mode)
                     self.assertEqual(restricted_mode, 0o000)
-                    self.assertFalse((home / ".local/state").exists())
+                    state = home / ".local/state"
+                    self.assertEqual(
+                        {
+                            str(path.relative_to(state))
+                            for path in state.rglob("*")
+                        },
+                        {
+                            "omarchy-firefox-bridge",
+                            "omarchy-firefox-bridge/install.lock",
+                        },
+                    )
+                    self.assert_regular(
+                        state / "omarchy-firefox-bridge/install.lock",
+                        0o600,
+                    )
+                    self.assert_directory(
+                        state / "omarchy-firefox-bridge",
+                        0o700,
+                    )
+                    self.assertFalse((home / ".local/bin").exists())
+                    self.assertFalse((home / ".mozilla").exists())
+                    self.assertFalse((home / ".config").exists())
                     self.assert_no_debris(home)
                     restricted.chmod(0o700)
                     after = snapshot(library)
@@ -484,6 +505,15 @@ fi
                                 make_accessible(child)
 
                     make_accessible(home)
+
+    def test_mutable_destination_validation_occurs_only_under_lock(self):
+        source = self.fixture_repo.joinpath("install.sh").read_text()
+        before_lock, after_lock = source.split(
+            "fcntl.flock(lock_descriptor, fcntl.LOCK_EX)",
+            1,
+        )
+        self.assertEqual(before_lock.count("validate_final_entries()"), 1)
+        self.assertEqual(after_lock.count("validate_final_entries()"), 1)
 
     def test_fresh_hook_failure_leaves_only_persistent_lock_state(self):
         home = self.make_home()
@@ -665,8 +695,14 @@ fi
                 lock = home / ".local/state/omarchy-firefox-bridge/install.lock"
                 self.assert_regular(lock, 0o600)
 
-    def test_concurrent_installers_serialize_complete_transactions(self):
+    def test_concurrent_upgrades_serialize_complete_transactions(self):
         home = self.make_home()
+        self.run_install(home)
+        self.assert_installed(home)
+        self.assert_no_debris(home)
+        lock = home / ".local/state/omarchy-firefox-bridge/install.lock"
+        lock_inode = lock.stat().st_ino
+        (self.root / "hook.log").unlink()
         environment = self.environment(home, TEST_HOOK_DELAY="0.2")
         command = ["/usr/bin/bash", str(self.fixture_repo / "install.sh")]
         processes = [
@@ -688,6 +724,7 @@ fi
         self.assertNotEqual(lines[0].split()[1], lines[2].split()[1])
         self.assert_installed(home)
         self.assert_no_debris(home)
+        self.assertEqual(lock.stat().st_ino, lock_inode)
 
     def test_hook_rejects_redirection_and_replaces_final_symlink_safely(self):
         hook = self.fixture_repo / "hooks/omarchy-firefox-bridge"

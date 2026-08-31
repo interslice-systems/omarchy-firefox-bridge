@@ -506,7 +506,6 @@ def install_transaction():
     validate_sources()
     validate_runtime()
     validate_existing_components()
-    validate_final_entries()
 
     state_descriptor, state_mode, _state_created = ensure_relative_directory(
         (".local", "state", "omarchy-firefox-bridge"),
