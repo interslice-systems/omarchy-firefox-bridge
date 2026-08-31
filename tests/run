@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo"
+
+PYTHONPATH=src python3 -m unittest discover -s tests/python -v
+node --test tests/extension/*.test.mjs
+npm exec -- web-ext lint --source-dir extension --warnings-as-errors
+bash tests/shell/test_sandbox.sh
+bash tests/shell/test_install.sh
+bash -n install.sh bin/omarchy-firefox-bridge \
+  libexec/omarchy-firefox-bridge-sandbox hooks/omarchy-firefox-bridge

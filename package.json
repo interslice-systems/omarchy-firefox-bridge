@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "tests/run",
     "test:python": "PYTHONPATH=src python3 -m unittest discover -s tests/python -v",
     "test:extension": "node --test tests/extension/*.test.mjs",
-    "lint:extension": "web-ext lint --source-dir extension --warnings-as-errors"
+    "lint:extension": "web-ext lint --source-dir extension --warnings-as-errors",
+    "sign": "web-ext sign --source-dir extension --artifacts-dir extension/web-ext-artifacts --channel unlisted"
   },
   "devDependencies": {
     "web-ext": "10.6.0"

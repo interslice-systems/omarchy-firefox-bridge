@@ -1,246 +1,351 @@
-# Omarchy Color Sync
+# Omarchy Firefox Bridge
 
-Live-syncs Firefox chrome colors with the current Omarchy theme. When you run
-`omarchy theme set <name>`, Firefox's URL bar, tabs, toolbar, popups, and
-sidebar repaint within ~200ms — no Firefox restart.
+Omarchy Firefox Bridge is a local Firefox gateway for Omarchy 4. It keeps
+Firefox chrome colors synchronized with the current Omarchy theme and exposes
+a bounded snapshot-and-activate interface for desktop components such as a
+workspace menu.
 
-(The extension is named "Omarchy Color Sync" rather than "Omarchy Firefox
-Theme Sync" because AMO's automated validator rejects extension names
-containing the words "Firefox" or "Mozilla" under their trademark policy.
-The README, code, project directory, and gecko ID all reference Firefox
-because nominative use outside the `name` field is fine.)
+The extension is named **Omarchy Bridge**. Its Gecko ID is
+`omarchy-bridge@interslice.systems`; its native-host name is
+`omarchy_firefox_bridge`.
 
-## How it works
+## Requirements
 
-```
-omarchy theme set foo
-  → ~/.config/omarchy/current/theme/colors.toml  (atomically replaced)
-    → inotify event picked up by helper (Python script spawned by Firefox)
-      → 4-byte length-prefixed JSON over native messaging stdio
-        → background.js calls browser.theme.update({colors: …})
-          → Firefox chrome repaints
-```
+- Omarchy 4
+- Firefox 142 or newer
+- Python 3.11 or newer
+- Bubblewrap
+- inotify-tools
+- Node 20 or newer and npm for tests, linting, and signing
 
-The Python helper is not a daemon — Firefox spawns it as a child when the
-extension calls `runtime.connectNative()`, and reaps it when Firefox exits.
-No systemd unit, no pidfile, no restart logic.
-
-## Install
-
-One-time prereqs:
+Install runtime packages from official repositories:
 
 ```bash
-sudo pacman -S inotify-tools
-yay -S web-ext-bin            # or paru, or: npm i -g web-ext
+sudo pacman -S --needed bubblewrap firefox inotify-tools python
 ```
 
-Get an AMO API key (see [Signing the extension](#signing-the-extension)
-below for what this is and why it's needed), then:
+Install development tools from official repositories and npm:
 
 ```bash
-export WEB_EXT_API_KEY=user:12345:678
-export WEB_EXT_API_SECRET=...
-cd ~/miyagi/scripts/firefox-color-sync
+sudo pacman -S --needed nodejs npm
+npm ci
+```
+
+The project does not use the AUR.
+
+## Local Installation
+
+```bash
 ./install.sh
 ```
 
-The installer:
-1. Symlinks the helper into `~/.local/bin/`
-2. Writes `~/.mozilla/native-messaging-hosts/omarchy_firefox_theme.json` with the resolved helper path
-3. Symlinks the Omarchy hook into `~/.config/omarchy/hooks/theme-set.d/`
-4. Signs the extension via AMO (slow; see Signing section)
-5. Prints the path to the signed XPI for manual install in Firefox
+The installer is idempotent, local-only, and refuses to run as root. It
+requires the production runtimes at their exact `/usr/bin` paths, verifies
+Omarchy 4 and Python 3.11 or newer, and installs copied regular files rather
+than links back into the repository.
 
-Re-run any time — the symlinks/manifest steps are idempotent. Pass
-`--rebuild` to force re-signing after editing the extension.
+The installed product is exactly:
 
-Final step (manual, since Firefox stable has no clean CLI path for unlisted XPIs):
-
-1. Open Firefox → `about:addons`
-2. Click the gear ⚙ → **Install Add-on From File…**
-3. Pick the XPI path that `install.sh` printed
-
-## Verify
-
-Standalone smoke tests (no Firefox required):
-
-```bash
-./smoke.sh
+```text
+~/.local/bin/omarchy-firefox-bridge
+~/.local/lib/omarchy-firefox-bridge/
+  libexec/omarchy-firefox-bridge-sandbox
+  src/omarchy_firefox_bridge/__init__.py
+  src/omarchy_firefox_bridge/client.py
+  src/omarchy_firefox_bridge/colors.py
+  src/omarchy_firefox_bridge/framing.py
+  src/omarchy_firefox_bridge/host.py
+  src/omarchy_firefox_bridge/protocol.py
+  src/omarchy_firefox_bridge/sandbox_probe.py
+  src/omarchy_firefox_bridge/socket_server.py
+  src/omarchy_firefox_bridge/theme.py
+~/.mozilla/native-messaging-hosts/omarchy_firefox_bridge.json
+~/.config/omarchy/hooks/theme-set.d/omarchy-firefox-bridge
 ```
 
-Covers: color mapping against the current theme, dark/light branch with a
-synthetic light palette, full helper end-to-end with the real native
-messaging wire protocol, and `web-ext lint` if available.
+The manifest directory is mode `0700`, the manifest is `0600`, executable
+files are `0755`, and installed Python files are `0644`. The installer also
+keeps its owner-only serialization lock at:
 
-End-to-end with Firefox running:
-
-```bash
-omarchy theme set tokyo-night   # any installed theme
-omarchy theme set aether        # switch back
+```text
+~/.local/state/omarchy-firefox-bridge/install.lock
 ```
 
-Chrome should repaint within ~200ms each time.
+The lock directory is mode `0700` and the lock file is `0600`. While holding
+that lock, the installer validates mutable destinations, stages every
+replacement beside its destination, swaps the complete product as one
+transaction, asks Omarchy to install the hook, and verifies the exact installed
+inventory, contents, ownership, and modes. Any failure or interruption before
+commit restores the prior active and legacy entries, directory modes, and
+newly created parents; the persistent lock state remains. A successful commit
+removes transaction backups, staging entries, and the three known legacy
+installation entries.
 
-Helper logs: `about:debugging → This Firefox → Inspect` on the extension →
-Console (filter `[omarchy-firefox-theme]`).
+It does not install packages, contact AMO, use signing credentials, or install
+an XPI.
 
-Hook breadcrumb (proves the Omarchy side of the chain fired):
+## Architecture
 
-```bash
-cat ~/.local/state/omarchy-firefox-theme/last-hook
+Firefox loads `extension/broker.js` and `extension/background.js`, which connect
+to the native host with `runtime.connectNative("omarchy_firefox_bridge")`.
+Firefox owns the helper lifetime and terminates it when the extension
+disconnects or Firefox exits. There is no systemd service, daemon, pidfile, or
+persistent tab database.
+
+The native-host manifest points at `~/.local/bin/omarchy-firefox-bridge`.
+Firefox supplies the manifest path and extension ID as process arguments; the
+executable treats only `tabs` and `activate` as CLI subcommands and sends all
+other invocations into native-host mode.
+
+Native-host mode enters Bubblewrap with:
+
+- a separate network namespace;
+- read-only `/usr` and installed bridge source;
+- read-only `~/.local/state/omarchy/current`;
+- no general home-directory contents;
+- tmpfs `/tmp`;
+- one writable `$XDG_RUNTIME_DIR/omarchy-firefox-bridge` directory.
+
+Binding the Omarchy `current` parent is deliberate. Omarchy 4 atomically
+replaces its `theme` directory, and binding only that child would pin the old
+directory inode and hide later theme changes.
+
+## Color Synchronization
+
+The helper reads only:
+
+```text
+~/.local/state/omarchy/current/theme/colors.toml
 ```
 
-## Signing the extension
+It sends the current palette immediately after startup and watches the
+`current` directory for Omarchy's atomic theme replacement. There is no
+fallback to the pre-Omarchy-4 configuration path.
 
-Firefox stable requires signed extensions and ignores
-`xpinstall.signatures.required=false`. Mozilla's free path is **unlisted
-self-distribution signing**: they sign your XPI for installation, but it
-doesn't appear on the public AMO catalog. Real signature, no public listing,
-no human review for the unlisted channel in most cases.
+Color messages are:
 
-### One-time setup
+```json
+{"type":"theme","theme":{}}
+```
 
-1. **Mozilla developer account + 2FA** at https://addons.mozilla.org. 2FA is
-   mandatory now — set up TOTP or a hardware key.
-2. **Generate JWT credentials** at
-   https://addons.mozilla.org/developers/addon/api/key/. Copy the issuer
-   (`user:1234:5678`) and the secret. Stash them in 1Password or
-   `~/.config/web-ext/config.json` (chmod 600). Never commit them.
-3. **Export for use by `install.sh`**:
-   ```bash
-   export WEB_EXT_API_KEY='user:1234:5678'
-   export WEB_EXT_API_SECRET='...'
-   ```
+The extension applies them with `browser.theme.update({colors: theme})`.
 
-### What `web-ext sign --channel=unlisted` does
+The installed theme-set hook is a diagnostic breadcrumb, not the transport.
+It records only timestamp and theme name at:
 
-1. Builds an XPI from `extension/`.
-2. Uploads it to AMO via the v5 submission API using the JWT credentials.
-3. AMO runs automated validation (manifest schema, no remote code execution,
-   no banned trademarks in `name`, no deprecated APIs).
-4. AMO either signs immediately (automated review path) or queues for human
-   review.
-5. `web-ext` polls for status. When signing is complete, it downloads the
-   signed XPI to `extension/web-ext-artifacts/`.
+```text
+$XDG_STATE_HOME/omarchy-firefox-bridge/last-theme-set
+```
 
-The default polling timeout is ~15 minutes. If AMO needs longer (human
-review can take hours to days), `web-ext` times out — but the submission
-stays in AMO's queue regardless, and you can re-fetch the signed XPI later.
+## Tab Projection
 
-## Gotchas
+The extension requests exactly `theme`, `nativeMessaging`, `alarms`, and
+`tabs`. It has no host permissions, content scripts, scripting permission,
+cookies, history, storage, or web-request access.
 
-- **AMO rejects names with "Firefox" or "Mozilla"** — trademark policy.
-  Applies to `name` in `manifest.json`. Nominative use elsewhere is fine.
-- **Signed XPIs get hash-prefix filenames** — e.g.,
-  `aa6a400863c74485b161-1.0.1.xpi` rather than `omarchy_color_sync-1.0.1.xpi`.
-  AMO does this on the unlisted channel; Firefox doesn't care about the
-  filename. Just install whichever XPI is in `extension/web-ext-artifacts/`.
-- **AMO refuses duplicate versions** — bump `version` in `manifest.json`
-  before any re-sign. Same gecko ID + same version = "already exists" error.
-- **`nativeMessaging` may trigger manual review** — but doesn't always.
-  In practice, the first sign of this extension went through automated
-  review in minutes. Don't assume the worst.
-- **`web-ext sign` killed during polling is safe** — the submission stays
-  in AMO's queue. Recover by downloading the signed XPI from
-  https://addons.mozilla.org/developers/ after the approval email arrives.
+`tabs` necessarily exposes title, URL, pending URL, and favicon references to
+the extension. Before data leaves Firefox, the broker emits only:
 
-## Iteration
+```json
+{
+  "tabId": 123,
+  "windowId": 456,
+  "index": 4,
+  "title": "Issue 401",
+  "displayUrl": "example.com/issues/401",
+  "favicon": "data:image/png;base64,iVBORw0KGgo=",
+  "active": false
+}
+```
 
-Edits to the **Python helper** (`helper/colors.py`,
-`helper/omarchy-firefox-theme-helper`) don't require re-signing — the helper
-is read from disk each time Firefox spawns it. Restart Firefox to pick up
-changes; the extension's connection to the old helper drops, and a fresh one
-spawns. For quicker feedback, run `./smoke.sh` to see the new mapping output
-without touching Firefox.
+Titles are bounded to 1,024 Unicode code points and display URLs to 4,096.
+HTTP(S) schemes and credentials are removed, `about:` retains only its page
+name, and every other scheme exposes only the scheme so `data:`, `javascript:`,
+`blob:`, and similar values cannot carry embedded payloads. Favicons must be
+strict base64 raster data URLs no larger than 64 KiB decoded; remote, internal,
+SVG, malformed, and oversized values become empty strings so the caller can
+use a packaged fallback. Raw URL and pending URL fields never cross native
+messaging.
 
-Edits to the **WebExtension** (`extension/manifest.json`,
-`extension/background.js`) have two paths:
+The extension declares `incognito: "not_allowed"` and still filters any tab
+marked incognito. It queries only `{windowType: "normal"}`.
 
-**Fast loop — temporary add-on**:
-1. `about:debugging → This Firefox → Load Temporary Add-on…`
-2. Pick: `~/miyagi/scripts/firefox-color-sync/extension/manifest.json`
+## Native Protocol
 
-Lasts until Firefox restart. Bypasses signing entirely. Runtime behavior is
-identical to a signed install — same permissions, same native messaging,
-same `browser.theme.update()`. Use this for iterating on `background.js`.
+Native messages use a four-byte little-endian length followed by UTF-8 JSON.
+Responses larger than 2 MiB are rejected. Request IDs are 1-64 printable ASCII
+characters.
 
-**Release — signed XPI**:
-1. Bump `version` in `extension/manifest.json` (e.g., 1.0.1 → 1.0.2).
-2. Set `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET`.
-3. `./install.sh --rebuild`.
-4. Install the new XPI via `about:addons → ⚙ → Install Add-on From File…`.
-   Firefox upgrades in place because the gecko ID is unchanged.
+Helper to extension:
 
-## Troubleshooting
+```json
+{"type":"tabs.list","requestId":"32-hex-characters"}
+{"type":"tabs.activate","requestId":"32-hex-characters","tabId":123,"windowId":456}
+```
 
-- **Theme doesn't update** — check extension console for "connected to native
-  helper" on startup and "pushed theme (…)" on each change.
-- **No "connected" log** — the native messaging host manifest is wrong.
-  Verify `~/.mozilla/native-messaging-hosts/omarchy_firefox_theme.json`
-  has the correct absolute path to the helper, and that the helper is
-  executable (`ls -l ~/.local/bin/omarchy-firefox-theme-helper`).
-- **Helper crashes mid-session** — `background.js` reconnects with
-  exponential backoff (1s → 60s cap), scheduled via `browser.alarms` so
-  the timer survives even if the event page idles out after the disconnect.
-  A fixed helper picks up within a minute, or on the next theme change.
-- **Theme reverts after Firefox relaunch** — extension console should show
-  `[omarchy] connected to native helper` within a second or two of launch.
-  If it doesn't, the MV3 event page isn't waking on startup. The script
-  registers `runtime.onStartup` + `runtime.onInstalled` listeners at module
-  load for exactly this reason; check that those calls still exist
-  unconditionally at the top level of `background.js`.
-- **Wrong shades on light themes** — tune the `_lift()` amounts in
-  `helper/colors.py`. The dark/light branch is automatic; the lift factors
-  are not theme-aware.
-- **`web-ext sign` hangs >5 min** — probably in manual review. Ctrl-C is
-  safe; the submission stays in AMO's queue. Wait for the approval email
-  and either re-run `install.sh --rebuild` after bumping the version, or
-  download the signed XPI directly from the AMO Developer Hub.
-- **AMO rejects "Add-on names cannot contain the Mozilla or Firefox
-  trademarks"** — trademark policy on the `name` field. Edit
-  `manifest.json` to use a neutral name.
-- **AMO rejects "Version already exists"** — bump `version` in
-  `manifest.json` before re-signing.
+Extension to helper:
 
-## Architecture details
+```json
+{"type":"tabs.result","requestId":"32-hex-characters","tabs":[]}
+{"type":"tabs.activated","requestId":"32-hex-characters","ok":true}
+```
 
-**Native messaging protocol** (Firefox spec):
-- Each message: 4-byte little-endian length prefix + UTF-8 JSON body.
-- Helper → extension: `{"type": "theme", "theme": { ...firefox theme dict... }}`.
-- Extension → helper: not used; helper drains incoming frames but ignores
-  them. EOF on stdin = Firefox shutting the helper down.
+Activation is allowed only for an ID pair in the latest successful snapshot.
+The extension then re-reads that tab, verifies its current window, and calls
+`browser.tabs.update(tabId, {active: true})`. No bridge command accepts a URL
+or requests navigation.
 
-**Native messaging host manifest** (`~/.mozilla/native-messaging-hosts/omarchy_firefox_theme.json`):
-- Tells Firefox where to find the helper executable and which extensions
-  may spawn it. The `allowed_extensions` list contains the gecko ID
-  (`omarchy-firefox-theme@miyagi.local`), so only this extension can
-  connect. The `path` must be absolute; `install.sh` resolves it via `sed`.
+## Local Socket And CLI
 
-**Extension wake-up** (`extension/background.js`):
-- MV3 event pages only run when something wakes them. Three top-level
-  listeners cover the wake cases: `runtime.onStartup` (browser launch),
-  `runtime.onInstalled` (install/update), and `alarms.onAlarm` (reconnect
-  timer, set when the native port disconnects). Without these, the script
-  stays dormant after a Firefox relaunch and the theme never re-applies —
-  Firefox shows whatever static theme `extensions.activeThemeID` names.
-  The native port keeps the page alive *during* a session, which is why
-  the bug shape is "works perfectly until you quit Firefox."
+The host creates:
 
-**Color mapping** (`helper/colors.py`):
-- Pure-stdlib palette → Firefox slot translation. Importable and
-  unit-testable. Detects dark vs light by WCAG luminance of background vs
-  foreground; lifts toward white (dark themes) or black (light themes).
-  Routes Omarchy `accent` to highlight slots (focused URL bar border,
-  active tab line, sidebar highlight, `icons_attention`) — not to chrome
-  fills, because Omarchy accents are tuned for highlighting, not filling.
+```text
+$XDG_RUNTIME_DIR/omarchy-firefox-bridge/bridge.sock
+```
 
-## Files
+The directory is mode `0700`; the socket is mode `0600`. Each connection sends
+one newline-terminated JSON request and receives one newline-terminated JSON
+response.
 
-- `helper/colors.py` — palette → Firefox slot mapping (pure stdlib)
-- `helper/omarchy-firefox-theme-helper` — native messaging entry point
-- `extension/manifest.json` + `extension/background.js` — MV3 WebExtension
-- `extension/icons/` — generated PNGs (48/96), gradient from background to accent
-- `native-host/omarchy_firefox_theme.json.tpl` — host manifest template (helper-path placeholder)
-- `hook/firefox-color-sync` — Omarchy `theme-set.d` debug breadcrumb hook
-- `install.sh` — idempotent installer (symlinks first, then sign)
-- `smoke.sh` — standalone end-to-end test (no Firefox required)
+```bash
+omarchy-firefox-bridge tabs
+omarchy-firefox-bridge activate 456 123
+```
+
+Requests:
+
+```json
+{"action":"tabs"}
+{"action":"activate","windowId":456,"tabId":123}
+```
+
+Responses:
+
+```json
+{"ok":true,"tabs":[]}
+{"ok":true}
+{"ok":false,"error":"unavailable"}
+{"ok":false,"error":"timeout"}
+{"ok":false,"error":"invalid-request"}
+{"ok":false,"error":"stale-tab"}
+{"ok":false,"error":"bridge-error"}
+```
+
+Exit `0` means success, `2` means invalid CLI input, and `3` means the bridge
+was unavailable or rejected the operation. Missing sockets fail immediately;
+a connected but silent host times out within 500ms. The CLI always writes one
+compact JSON object and never logs tab payloads.
+
+## Automated Verification
+
+```bash
+npm ci
+npm test
+```
+
+The gate runs all 79 Python unit tests, 15 extension broker and manifest tests,
+warning-as-error `web-ext lint`, the live Bubblewrap sandbox/host smoke test,
+14 adversarial installer tests in fake home directories, and Bash syntax
+checks.
+
+## Temporary Extension Verification
+
+Install the native side first:
+
+```bash
+./install.sh
+```
+
+In Firefox open `about:debugging#/runtime/this-firefox`, select **Load Temporary
+Add-on**, and choose `extension/manifest.json`. The temporary extension lasts
+until Firefox restarts. Use its **Inspect** action to view generic connection
+and failure logs.
+
+Verify the projected snapshot:
+
+```bash
+omarchy-firefox-bridge tabs | jq .
+```
+
+Choose an ID pair from that result and activate it:
+
+```bash
+snapshot=$(omarchy-firefox-bridge tabs)
+window_id=$(jq -r '.tabs[] | select(.active == false) | .windowId' <<<"$snapshot" | head -n1)
+tab_id=$(jq -r '.tabs[] | select(.active == false) | .tabId' <<<"$snapshot" | head -n1)
+omarchy-firefox-bridge activate "$window_id" "$tab_id" | jq .
+```
+
+Exercise one window with several tabs, multiple Firefox windows, duplicate
+titles, a title changing during a snapshot, a tab closing before activation,
+internal pages, missing favicons, a long URL, and approximately 15 tabs.
+Disable the temporary extension and confirm `tabs` fails closed. Re-enable it
+and verify chrome colors across an Omarchy theme change.
+
+Temporary installation does not present the complete signed-install permission
+and data-use prompt. Check that prompt again after signing.
+
+## AMO Signing
+
+Signing is human-gated and intentionally separate from `install.sh`. Firefox
+stable requires a signed XPI for persistent installation. The project uses
+AMO's unlisted/self-distributed channel.
+
+After temporary verification and a clean `npm test`, authenticate to Mozilla
+with 2FA and obtain AMO JWT credentials from
+`https://addons.mozilla.org/developers/addon/api/key/`. Keep them out of the
+repository and shell history:
+
+```bash
+read -r -p 'AMO JWT issuer: ' WEB_EXT_API_KEY
+read -r -s -p 'AMO JWT secret: ' WEB_EXT_API_SECRET
+printf '\n'
+export WEB_EXT_API_KEY WEB_EXT_API_SECRET
+npm run sign
+unset WEB_EXT_API_KEY WEB_EXT_API_SECRET
+```
+
+The manifest declares required `websiteContent` and `browsingActivity` data
+use because projected titles and URLs cross from the local browser into a local
+native process. The extension does not transmit them over a network or persist
+them.
+
+On the first submission, `web-ext sign` creates the unlisted AMO record and AMO
+checks that `omarchy-bridge@interslice.systems` is unique; there is no separate
+Developer Hub record to pre-create. After submission, inspect the record at
+`https://addons.mozilla.org/developers/addons` and confirm the Gecko ID, version,
+unlisted channel, and required `websiteContent` and `browsingActivity`
+declarations. `web-ext` waits for approval and downloads the signed XPI into
+`extension/web-ext-artifacts/`. AMO may require manual review because of `tabs`,
+`nativeMessaging`, and the data declarations. Killing the local polling process
+does not cancel a submitted AMO review.
+
+Install the approved XPI through `about:addons` -> gear menu -> **Install Add-on
+From File**. Verify the real permission prompt, restart Firefox, confirm the
+native connection returns, switch an Omarchy theme, list tabs, and activate one
+tab.
+
+AMO rejects duplicate versions for one Gecko ID. Increment
+`extension/manifest.json` before every later submission, run `npm test`, commit
+the version change, and then sign.
+
+## Failure Behavior
+
+| Condition | Result |
+|---|---|
+| Extension or helper absent | CLI returns `unavailable`; desktop caller keeps its Firefox window fallback |
+| Connected helper does not answer | CLI returns `timeout` within 500ms |
+| Native response is malformed or over 2 MiB | Snapshot is rejected; previous ID allowlist remains |
+| Tab moved or closed after snapshot | Activation fails; no URL is opened |
+| Favicon is missing or unsafe | Empty favicon field; caller uses packaged fallback |
+| Omarchy palette is absent or malformed | Theme push is skipped; host remains available |
+| Runtime path is occupied by an active host | A second host refuses to replace its socket |
+
+## Security Boundary
+
+Firefox has no title-only permission. Trust rests on the small signed broker
+because `tabs` can expose URLs and its update API is navigation-capable. The
+bridge narrows that authority with exact permissions, strict CSP, no host
+permissions, no URL-bearing commands, projected fields, bounded messages,
+owner-only local IPC, no payload logs, an isolated network namespace with no
+usable interfaces or routes, and no persistent writable helper path.
