@@ -1,12 +1,10 @@
 """Owner-only local Unix socket server for bridge clients."""
 from __future__ import annotations
 
-import ctypes
-import errno
+import fcntl
 import json
 import os
 from pathlib import Path
-import secrets
 import socket
 import stat
 import threading
@@ -14,6 +12,7 @@ import time
 from typing import Callable
 
 APPLICATION_DIRECTORY = "omarchy-firefox-bridge"
+LOCK_NAME = "bridge.lock"
 SOCKET_NAME = "bridge.sock"
 MAX_CLIENT_REQUEST = 4096
 MAX_CLIENT_WORKERS = 8
@@ -24,18 +23,8 @@ INVALID_REQUEST = {"ok": False, "error": "invalid-request"}
 BRIDGE_ERROR = {"ok": False, "error": "bridge-error"}
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_RENAME_NOREPLACE = 1
+_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _UMASK_LOCK = threading.Lock()
-_LIBC = ctypes.CDLL(None, use_errno=True)
-_RENAMEAT2 = _LIBC.renameat2
-_RENAMEAT2.argtypes = [
-    ctypes.c_int,
-    ctypes.c_char_p,
-    ctypes.c_int,
-    ctypes.c_char_p,
-    ctypes.c_uint,
-]
-_RENAMEAT2.restype = ctypes.c_int
 
 
 def _reject_json_constant(constant: str) -> None:
@@ -70,17 +59,51 @@ def _open_owned_directory(path: Path, description: str) -> int:
     return fd
 
 
-def _rename_noreplace(directory_fd: int, source: str, target: str) -> None:
-    result = _RENAMEAT2(
-        directory_fd,
-        os.fsencode(source),
-        directory_fd,
-        os.fsencode(target),
-        _RENAME_NOREPLACE,
-    )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        raise OSError(error_number, os.strerror(error_number), target)
+def _open_application_directory(directory: Path) -> int:
+    parent_fd = _open_owned_directory(directory.parent, "XDG_RUNTIME_DIR")
+    child_fd = None
+    try:
+        try:
+            os.mkdir(directory.name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise RuntimeError("cannot create bridge runtime directory") from error
+        try:
+            child_fd = os.open(directory.name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        except OSError as error:
+            raise RuntimeError(
+                "bridge runtime path must be an owned real directory"
+            ) from error
+        _validate_owned_directory(child_fd, "bridge runtime path")
+        os.fchmod(child_fd, 0o700)
+        result = child_fd
+        child_fd = None
+        return result
+    finally:
+        if child_fd is not None:
+            os.close(child_fd)
+        os.close(parent_fd)
+
+
+def _open_lifecycle_lock(directory_fd: int) -> int:
+    try:
+        lock_fd = os.open(LOCK_NAME, _LOCK_FLAGS, 0o600, dir_fd=directory_fd)
+    except OSError as error:
+        raise RuntimeError("bridge lock must be an owned regular file") from error
+    try:
+        metadata = os.fstat(lock_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise RuntimeError("bridge lock must be an owned regular file")
+        os.fchmod(lock_fd, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("bridge socket is already active") from error
+    except Exception:
+        os.close(lock_fd)
+        raise
+    return lock_fd
 
 
 def _compact_json(response: dict) -> bytes:
@@ -112,11 +135,17 @@ def runtime_directory() -> Path:
 
 
 class BridgeSocketServer:
-    """Serve bounded clients whose injected handler returns within 400 ms.
+    """Serve local clients under an owner-only advisory lifecycle lock.
 
-    Python cannot cancel an arbitrary function. Client workers are therefore
-    daemon threads, capped at eight, and shutdown waits one 500 ms aggregate
-    budget for the real Task 6 handler's 400 ms deadline.
+    The lock serializes conforming bridge instances and protects against
+    accidental replacement. Other same-UID processes are trusted and outside
+    this filesystem threat boundary because they can mutate owned directories,
+    ptrace the process, and race any pathname operation.
+
+    Handlers must return a dict within 400 ms. Python cannot safely cancel an
+    arbitrary callback, so at most eight daemon workers are admitted and close
+    waits one aggregate 500 ms budget. A violating handler cannot block process
+    exit, but may remain alive until it returns.
     """
 
     def __init__(self, directory: Path, handler: Callable[[dict], dict]) -> None:
@@ -126,6 +155,7 @@ class BridgeSocketServer:
         self.closed = False
         self.socket: socket.socket | None = None
         self._directory_fd: int | None = None
+        self._lock_fd: int | None = None
         self._socket_identity: tuple[int, int, int, int] | None = None
         self._state_lock = threading.Lock()
         self._close_lock = threading.Lock()
@@ -133,86 +163,43 @@ class BridgeSocketServer:
         self._workers: set[threading.Thread] = set()
         self._worker_slots = threading.BoundedSemaphore(MAX_CLIENT_WORKERS)
 
-        parent_fd = _open_owned_directory(directory.parent, "XDG_RUNTIME_DIR")
         try:
-            try:
-                os.mkdir(directory.name, mode=0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                pass
-            except OSError as error:
-                raise RuntimeError("cannot create bridge runtime directory") from error
-            try:
-                self._directory_fd = os.open(
-                    directory.name,
-                    _DIRECTORY_FLAGS,
-                    dir_fd=parent_fd,
-                )
-            except OSError as error:
-                raise RuntimeError(
-                    "bridge runtime path must be an owned real directory"
-                ) from error
-            _validate_owned_directory(
-                self._directory_fd,
-                "bridge runtime path",
-            )
-            os.fchmod(self._directory_fd, 0o700)
-        finally:
-            os.close(parent_fd)
-
-        bind_name = None
-        bind_identity = None
-        try:
+            self._directory_fd = _open_application_directory(directory)
+            self._lock_fd = _open_lifecycle_lock(self._directory_fd)
             self._remove_stale_socket()
             self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            bind_name = f".{SOCKET_NAME}.bind-{secrets.token_hex(16)}"
             with _UMASK_LOCK:
                 old_umask = os.umask(0o177)
                 try:
-                    self.socket.bind(self._socket_path_for_fd(bind_name))
+                    self.socket.bind(self._socket_path_for_fd())
                 finally:
                     os.umask(old_umask)
-            metadata = self._socket_metadata(bind_name)
-            if (
-                not stat.S_ISSOCK(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-            ):
-                raise RuntimeError("bound bridge socket has unsafe identity or mode")
-            bind_identity = _identity(metadata)
+            metadata = self._socket_metadata()
+            if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise RuntimeError("bound bridge socket has unsafe identity")
+            self._socket_identity = _identity(metadata)
+            os.chmod(
+                SOCKET_NAME,
+                0o600,
+                dir_fd=self._directory_fd,
+                follow_symlinks=False,
+            )
             self.socket.listen(8)
-            try:
-                _rename_noreplace(self._directory_fd, bind_name, SOCKET_NAME)
-            except OSError as error:
-                raise RuntimeError("bridge socket path changed during bind") from error
-            self._socket_identity = bind_identity
-            bind_name = None
             self.socket.settimeout(0.1)
         except Exception:
             if self.socket is not None:
                 self.socket.close()
-            if self._socket_identity is not None:
-                try:
-                    self._remove_exact_socket(SOCKET_NAME, self._socket_identity)
-                except RuntimeError:
-                    pass
-            elif bind_identity is not None and bind_name is not None:
-                try:
-                    self._remove_exact_socket(bind_name, bind_identity)
-                except RuntimeError:
-                    pass
-            if self._directory_fd is not None:
-                os.close(self._directory_fd)
-                self._directory_fd = None
+            self._release_lifecycle()
             raise
 
-    def _socket_path_for_fd(self, name: str = SOCKET_NAME) -> str:
+    def _socket_path_for_fd(self) -> str:
         assert self._directory_fd is not None
-        return f"/proc/self/fd/{self._directory_fd}/{name}"
+        return f"/proc/self/fd/{self._directory_fd}/{SOCKET_NAME}"
 
-    def _socket_metadata(self, name: str = SOCKET_NAME) -> os.stat_result:
+    def _socket_metadata(self) -> os.stat_result:
         assert self._directory_fd is not None
         return os.stat(
-            name,
+            SOCKET_NAME,
             dir_fd=self._directory_fd,
             follow_symlinks=False,
         )
@@ -230,7 +217,14 @@ class BridgeSocketServer:
         try:
             probe.connect(self._socket_path_for_fd())
         except (ConnectionRefusedError, FileNotFoundError):
-            self._remove_exact_socket(SOCKET_NAME, expected)
+            try:
+                current = self._socket_metadata()
+            except FileNotFoundError:
+                return
+            if _identity(current) != expected:
+                raise RuntimeError("refusing to remove a changed socket path")
+            assert self._directory_fd is not None
+            os.unlink(SOCKET_NAME, dir_fd=self._directory_fd)
         except OSError as error:
             raise RuntimeError("cannot prove bridge socket is stale") from error
         else:
@@ -238,42 +232,42 @@ class BridgeSocketServer:
         finally:
             probe.close()
 
-    def _remove_exact_socket(
-        self,
-        name: str,
-        expected: tuple[int, int, int, int],
-    ) -> None:
-        assert self._directory_fd is not None
-        quarantine = f".{SOCKET_NAME}.quarantine-{secrets.token_hex(16)}"
+    def _remove_bound_socket(self) -> None:
+        if self._socket_identity is None or self._directory_fd is None:
+            return
         try:
-            os.rename(
-                name,
-                quarantine,
-                src_dir_fd=self._directory_fd,
-                dst_dir_fd=self._directory_fd,
-            )
+            metadata = self._socket_metadata()
         except FileNotFoundError:
             return
-        metadata = os.stat(
-            quarantine,
-            dir_fd=self._directory_fd,
-            follow_symlinks=False,
-        )
-        if _identity(metadata) != expected:
-            try:
-                _rename_noreplace(self._directory_fd, quarantine, name)
-            except OSError as error:
-                if error.errno != errno.EEXIST:
-                    raise RuntimeError(
-                        "socket identity changed and restoration failed"
-                    ) from error
-            raise RuntimeError("refusing to remove a changed socket path")
-        os.unlink(quarantine, dir_fd=self._directory_fd)
+        if _identity(metadata) != self._socket_identity:
+            return
+        try:
+            os.unlink(SOCKET_NAME, dir_fd=self._directory_fd)
+        except FileNotFoundError:
+            pass
+
+    def _close_descriptors(self) -> None:
+        lock_fd, self._lock_fd = self._lock_fd, None
+        directory_fd, self._directory_fd = self._directory_fd, None
+        try:
+            if lock_fd is not None:
+                os.close(lock_fd)
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+
+    def _release_lifecycle(self) -> None:
+        try:
+            self._remove_bound_socket()
+        except OSError:
+            pass
+        finally:
+            self._close_descriptors()
 
     def _serve_client(self, client: socket.socket) -> None:
         response = INVALID_REQUEST
-        client.settimeout(CLIENT_READ_TIMEOUT)
         try:
+            client.settimeout(CLIENT_READ_TIMEOUT)
             with client.makefile("rb") as stream:
                 raw = stream.readline(MAX_CLIENT_REQUEST + 1)
             if raw.endswith(b"\n") and len(raw) <= MAX_CLIENT_REQUEST:
@@ -283,7 +277,8 @@ class BridgeSocketServer:
                     request = None
                 if isinstance(request, dict):
                     try:
-                        response = self.handler(request)
+                        candidate = self.handler(request)
+                        response = candidate if isinstance(candidate, dict) else BRIDGE_ERROR
                     except Exception:
                         response = BRIDGE_ERROR
         except Exception:
@@ -311,28 +306,27 @@ class BridgeSocketServer:
         if not self._worker_slots.acquire(blocking=False):
             client.close()
             return
-        worker = threading.Thread(
-            target=self._client_worker,
-            args=(client,),
-            name="omarchy-firefox-bridge-client",
-            daemon=True,
-        )
         with self._state_lock:
             if self.closed:
                 self._worker_slots.release()
                 client.close()
                 return
-            self._clients.add(client)
-            self._workers.add(worker)
-        try:
-            worker.start()
-        except Exception:
-            with self._state_lock:
+            try:
+                worker = threading.Thread(
+                    target=self._client_worker,
+                    args=(client,),
+                    name="omarchy-firefox-bridge-client",
+                    daemon=True,
+                )
+                self._clients.add(client)
+                self._workers.add(worker)
+                worker.start()
+            except Exception:
                 self._clients.discard(client)
-                self._workers.discard(worker)
-            self._worker_slots.release()
-            client.close()
-            return
+                if "worker" in locals():
+                    self._workers.discard(worker)
+                self._worker_slots.release()
+                client.close()
 
     def serve_forever(self, stop: threading.Event) -> None:
         try:
@@ -362,37 +356,28 @@ class BridgeSocketServer:
                 listener = self.socket
                 clients = list(self._clients)
                 workers = list(self._workers)
-            if listener is not None:
-                try:
-                    listener.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                listener.close()
-            for client in clients:
-                try:
-                    client.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                client.close()
+            try:
+                if listener is not None:
+                    try:
+                        listener.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    listener.close()
+                for client in clients:
+                    try:
+                        client.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    client.close()
 
-            deadline = time.monotonic() + SHUTDOWN_TIMEOUT
-            current = threading.current_thread()
-            for worker in workers:
-                if worker is current:
-                    continue
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                worker.join(remaining)
-
-            cleanup_error = None
-            if self._socket_identity is not None and self._directory_fd is not None:
-                try:
-                    self._remove_exact_socket(SOCKET_NAME, self._socket_identity)
-                except RuntimeError as error:
-                    cleanup_error = error
-            if self._directory_fd is not None:
-                os.close(self._directory_fd)
-                self._directory_fd = None
-            if cleanup_error is not None:
-                raise cleanup_error
+                deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+                current = threading.current_thread()
+                for worker in workers:
+                    if worker is current:
+                        continue
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    worker.join(remaining)
+            finally:
+                self._release_lifecycle()
