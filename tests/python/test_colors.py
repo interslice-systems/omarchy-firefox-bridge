@@ -25,6 +25,10 @@ class ColorMappingTest(unittest.TestCase):
         self.assertEqual(theme["toolbar_field"], "#2a1b46")
         self.assertEqual(theme["toolbar_field_focus"], "#34274f")
         self.assertEqual(theme["tab_line"], "#ff70a6")
+        self.assertEqual(theme["popup_highlight"], "#59306f")
+        self.assertEqual(theme["popup_highlight_text"], "#f2e9ff")
+        self.assertEqual(theme["sidebar_highlight"], "#ff70a6")
+        self.assertEqual(theme["sidebar_highlight_text"], "#f2e9ff")
         self.assertEqual(len(theme), 29)
 
     def test_darkens_light_theme_toolbar(self):
@@ -34,16 +38,19 @@ class ColorMappingTest(unittest.TestCase):
         self.assertLess(toolbar, frame)
         self.assertEqual(theme["toolbar_field_border_focus"], "#0066cc")
 
-    def test_missing_required_palette_key_fails_closed(self):
+    def test_missing_selection_fails_closed(self):
+        palette = self.fixture("dark-colors.toml")
+        del palette["selection"]
         with self.assertRaises(KeyError):
-            omarchy_to_firefox_theme({"background": "#000000"})
+            omarchy_to_firefox_theme(palette)
 
-    def test_wrong_type_or_malformed_color_fails_closed(self):
-        for background in (1, None, "#fff", "#gg0000"):
-            with self.subTest(background=background), self.assertRaises(ValueError):
-                palette = self.fixture("dark-colors.toml")
-                palette["background"] = background
-                omarchy_to_firefox_theme(palette)
+    def test_required_colors_are_strict_six_digit_hex(self):
+        for key in ("background", "foreground", "accent", "selection"):
+            for value in (1, None, "#fff", "#gg0000"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    palette = self.fixture("dark-colors.toml")
+                    palette[key] = value
+                    omarchy_to_firefox_theme(palette)
 
 
 if __name__ == "__main__":

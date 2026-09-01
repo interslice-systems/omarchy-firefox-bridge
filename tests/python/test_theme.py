@@ -49,15 +49,12 @@ class ThemeTest(unittest.TestCase):
         )
 
     def test_reads_a_complete_theme_message(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "colors.toml"
-            path.write_text(
-                'background="#000000"\nforeground="#ffffff"\naccent="#ff0000"\n'
-                'selection_background="#333333"\nselection_foreground="#ffffff"\n'
-            )
-            message = read_theme_message(path)
-            self.assertEqual(message["type"], "theme")
-            self.assertEqual(message["theme"]["frame"], "#000000")
+        path = ROOT / "tests" / "fixtures" / "dark-colors.toml"
+        message = read_theme_message(path)
+        self.assertEqual(message["type"], "theme")
+        self.assertEqual(message["theme"]["frame"], "#120231")
+        self.assertEqual(message["theme"]["popup_highlight"], "#59306f")
+        self.assertEqual(message["theme"]["popup_highlight_text"], "#f2e9ff")
 
     def test_missing_malformed_or_incomplete_palette_returns_none(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -67,12 +64,11 @@ class ThemeTest(unittest.TestCase):
             self.assertIsNone(read_theme_message(path))
             path.write_text('background="#000000"\n')
             self.assertIsNone(read_theme_message(path))
-            for background in ('1', '"#fff"', '"#gg0000"'):
+            for selection in ('1', '"#fff"', '"#gg0000"'):
                 path.write_text(
-                    f"background={background}\n"
+                    'mode="dark"\nbackground="#000000"\n'
                     'foreground="#ffffff"\naccent="#ff0000"\n'
-                    'selection_background="#333333"\n'
-                    'selection_foreground="#ffffff"\n'
+                    f"selection={selection}\n"
                 )
                 self.assertIsNone(read_theme_message(path))
 

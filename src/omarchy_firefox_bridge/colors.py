@@ -8,8 +8,7 @@ COLOR_KEYS = (
     "background",
     "foreground",
     "accent",
-    "selection_background",
-    "selection_foreground",
+    "selection",
 )
 HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
@@ -63,8 +62,7 @@ def omarchy_to_firefox_theme(palette: dict) -> dict:
     foreground = _hex_to_rgb(colors["foreground"])
     foreground_hex = colors["foreground"]
     accent_hex = colors["accent"]
-    selection_background = colors["selection_background"]
-    selection_foreground = colors["selection_foreground"]
+    selection = colors["selection"]
     is_dark = _luminance(background) < _luminance(foreground)
     frame = background
     toolbar = _lift(background, 0.05, is_dark)
@@ -87,12 +85,12 @@ def omarchy_to_firefox_theme(palette: dict) -> dict:
         "tab_line": accent_hex,
         "popup": _rgb_to_hex(toolbar),
         "popup_text": foreground_hex,
-        "popup_highlight": selection_background,
-        "popup_highlight_text": selection_foreground,
+        "popup_highlight": selection,
+        "popup_highlight_text": foreground_hex,
         "sidebar": _rgb_to_hex(toolbar),
         "sidebar_text": foreground_hex,
         "sidebar_highlight": accent_hex,
-        "sidebar_highlight_text": selection_foreground,
+        "sidebar_highlight_text": foreground_hex,
         "icons": foreground_hex,
         "icons_attention": accent_hex,
         "button_background_hover": _rgb_to_hex(_lift(toolbar, 0.08, is_dark)),
