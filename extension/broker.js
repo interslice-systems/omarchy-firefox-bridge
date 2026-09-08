@@ -164,6 +164,7 @@
     ) {
       return false;
     }
+    if (CONTROL_CHARACTERS.test(title)) return false;
     if (value.color !== undefined && !GROUP_COLORS.has(value.color)) return false;
     return value.color === undefined ? { title } : { title, color: value.color };
   }

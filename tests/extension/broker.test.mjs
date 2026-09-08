@@ -617,6 +617,19 @@ test("refuses urls containing control characters", async () => {
   assert.equal(responses[0].error, "invalid-request");
 });
 
+test("refuses a group title containing a control character", async () => {
+  const broker = loadBroker();
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: `oracle${String.fromCharCode(10)}` } }),
+    fakeBrowser(),
+    (r) => responses.push(r),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: false, error: "invalid-request" },
+  ]);
+});
+
 test("reports no-window and ambiguous-window without creating a tab", async () => {
   const broker = loadBroker();
 
