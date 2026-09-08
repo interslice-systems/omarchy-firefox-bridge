@@ -221,7 +221,9 @@ $XDG_RUNTIME_DIR/omarchy-firefox-bridge/bridge.sock
 
 The directory is mode `0700`; the socket is mode `0600`. Each connection sends
 one newline-terminated JSON request and receives one newline-terminated JSON
-response. A request is capped at 4,096 bytes including its terminating newline.
+response. A request is capped at 24,576 bytes including its terminating
+newline, sized to accommodate a 4,096-code-point URL in 4-byte UTF-8 plus a
+1,024-code-point window title.
 
 ```bash
 omarchy-firefox-bridge tabs
@@ -235,6 +237,11 @@ omarchy-firefox-bridge open --toplevel-title T --url https://example.com/ \
 creates a tab there for `--url`, and optionally files it into a tab group
 named by `--group` (created if it does not already exist), coloured by
 `--color`. `--color` requires `--group`.
+
+`url` is 1-4,096 code points; `toplevelTitle` is 1-1,024 code points;
+`group.title` is 1-64 code points. `group.color` is one of `blue`, `cyan`,
+`grey`, `green`, `orange`, `pink`, `purple`, `red`, `yellow` (note `grey`, not
+`gray`).
 
 Requests:
 
