@@ -115,3 +115,75 @@ def snapshot_ids(tabs: list[dict]) -> frozenset[tuple[int, int]]:
 
 def validate_activation(window_id: object, tab_id: object) -> tuple[int, int]:
     return _positive_integer(window_id, "windowId"), _positive_integer(tab_id, "tabId")
+
+
+URL_LIMIT = 4096
+TOPLEVEL_TITLE_LIMIT = 1024
+GROUP_TITLE_LIMIT = 64
+
+# Firefox's nine fixed tab group colours. Note "grey", not "gray": Firefox uses
+# the Chromium-compatible spelling in the WebExtension API.
+GROUP_COLORS = frozenset(
+    {"blue", "cyan", "grey", "green", "orange", "pink", "purple", "red", "yellow"}
+)
+
+HTTP_SCHEME = re.compile(r"^https?://", re.IGNORECASE)
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+# The charset wsid_session_name guarantees: no ASCII controls or whitespace and
+# none of . : / # -- note that * and ? DO survive it, which is safe here only
+# because the extension filters group titles literally rather than as globs.
+GROUP_TITLE = re.compile(r"^[^\x00-\x20\x7f.:/#]+$")
+
+
+def _bounded_text(value: object, limit: int, name: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise ProtocolError(f"{name} must be a string of 1 to {limit} code points")
+    if CONTROL_CHARACTERS.search(value):
+        raise ProtocolError(f"{name} must not contain C0 controls or DEL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ProtocolError(f"{name} must be well-formed Unicode") from error
+    return value
+
+
+def _open_group(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ProtocolError("group must be an object")
+    keys = frozenset(value)
+    if keys not in (frozenset({"title"}), frozenset({"title", "color"})):
+        raise ProtocolError("group has missing or unknown fields")
+    title = _bounded_text(value["title"], GROUP_TITLE_LIMIT, "group.title")
+    if not GROUP_TITLE.fullmatch(title):
+        raise ProtocolError("group.title is outside the canonical workspace charset")
+    group = {"title": title}
+    if "color" in value:
+        color = value["color"]
+        if not isinstance(color, str) or color not in GROUP_COLORS:
+            raise ProtocolError("group.color must be one of the nine Firefox colours")
+        group["color"] = color
+    return group
+
+
+def validate_open_request(value: object) -> dict:
+    """Coarse validation only. The extension's WHATWG URL parser is authoritative."""
+    if not isinstance(value, dict):
+        raise ProtocolError("open request must be an object")
+    keys = frozenset(value)
+    if keys not in (
+        frozenset({"url", "toplevelTitle"}),
+        frozenset({"url", "toplevelTitle", "group"}),
+    ):
+        raise ProtocolError("open request has missing or unknown fields")
+    url = _bounded_text(value["url"], URL_LIMIT, "url")
+    if not HTTP_SCHEME.match(url):
+        raise ProtocolError("url must use the http or https scheme")
+    request = {
+        "url": url,
+        "toplevelTitle": _bounded_text(
+            value["toplevelTitle"], TOPLEVEL_TITLE_LIMIT, "toplevelTitle"
+        ),
+    }
+    if "group" in value:
+        request["group"] = _open_group(value["group"])
+    return request
