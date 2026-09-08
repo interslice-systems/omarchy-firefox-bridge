@@ -14,7 +14,10 @@ from typing import Callable
 APPLICATION_DIRECTORY = "omarchy-firefox-bridge"
 LOCK_NAME = "bridge.lock"
 SOCKET_NAME = "bridge.sock"
-MAX_CLIENT_REQUEST = 4096
+# Budget (spec 2026-09-08 § Size budget): url 4096 code points x 4 bytes = 16384,
+# toplevelTitle 1024 x 4 = 4096, group.title 64 x 4 = 256, requestId/type/color
+# plus JSON structure ~300. Total ~21 KiB.
+MAX_CLIENT_REQUEST = 24576
 MAX_CLIENT_WORKERS = 8
 CLIENT_READ_TIMEOUT = 0.5
 SHUTDOWN_TIMEOUT = 0.5
