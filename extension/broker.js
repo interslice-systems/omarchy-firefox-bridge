@@ -139,7 +139,7 @@
 
   function safeOpenUrl(value) {
     if (typeof value !== "string") return "";
-    if (value.length === 0 || value.length > URL_LIMIT_OPEN) return "";
+    if (value.length === 0 || boundedString(value, URL_LIMIT_OPEN) !== value) return "";
     if (CONTROL_CHARACTERS.test(value)) return "";
     let parsed;
     try {
@@ -157,7 +157,11 @@
     if (value === undefined) return null;
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const title = value.title;
-    if (typeof title !== "string" || title.length === 0 || title.length > GROUP_TITLE_LIMIT) {
+    if (
+      typeof title !== "string" ||
+      title.length === 0 ||
+      boundedString(title, GROUP_TITLE_LIMIT) !== title
+    ) {
       return false;
     }
     if (value.color !== undefined && !GROUP_COLORS.has(value.color)) return false;
@@ -168,7 +172,7 @@
     if (
       typeof toplevelTitle !== "string" ||
       toplevelTitle.length === 0 ||
-      toplevelTitle.length > TOPLEVEL_TITLE_LIMIT
+      boundedString(toplevelTitle, TOPLEVEL_TITLE_LIMIT) !== toplevelTitle
     ) {
       return { error: OPEN_ERRORS.INVALID };
     }
@@ -283,13 +287,14 @@
         });
         return true;
       }
-      let tab;
+      let tabId;
       try {
-        tab = await browserApi.tabs.create({
+        const tab = await browserApi.tabs.create({
           windowId: correlated.windowId,
           url,
           active: true,
         });
+        tabId = tab.id;
       } catch (_error) {
         respond({
           type: "tabs.opened",
@@ -305,11 +310,11 @@
         type: "tabs.opened",
         requestId: message.requestId,
         ok: true,
-        tabId: tab.id,
+        tabId,
       });
       if (group) {
         enqueueGroup(correlated.windowId, () =>
-          attachToGroup(browserApi, correlated.windowId, tab.id, group),
+          attachToGroup(browserApi, correlated.windowId, tabId, group),
         );
       }
       return true;

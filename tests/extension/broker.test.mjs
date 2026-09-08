@@ -480,12 +480,27 @@ function openMessage(changes = {}) {
 test("creates a tab in the correlated window and answers before grouping", async () => {
   const broker = loadBroker();
   const api = fakeBrowser();
+  let releaseGroupQuery;
+  const groupQueryGate = new Promise((resolve) => {
+    releaseGroupQuery = resolve;
+  });
+  api.tabGroups.query = async (filter) => {
+    api.calls.queried.push(filter);
+    await groupQueryGate;
+    return [];
+  };
   const responses = [];
-  await broker.handleNativeMessage(
+  const handled = broker.handleNativeMessage(
     openMessage({ group: { title: "oracle", color: "yellow" } }),
     api,
     (response) => responses.push(response),
   );
+  await handled;
+  // The response must land before grouping does any work at all -- not just
+  // before it finishes. tabGroups.query above is gated shut, so if the
+  // implementation awaited the whole grouping chain before responding, this
+  // assertion would hang or see zero responses instead of one.
+  assert.equal(responses.length, 1);
   assert.deepEqual(api.calls.created, [
     { windowId: 10, url: "https://example.com/a", active: true },
   ]);
@@ -493,6 +508,74 @@ test("creates a tab in the correlated window and answers before grouping", async
     { type: "tabs.opened", requestId: "r1", ok: true, tabId: 99 },
   ]);
   assert.equal(responses[0].groupId, undefined);
+  releaseGroupQuery();
+  await broker.groupsSettled();
+  assert.deepEqual(JSON.parse(JSON.stringify(api.calls.updated)), [
+    { groupId: 500, properties: { title: "oracle", color: "yellow" } },
+  ]);
+});
+
+test("refuses a group colour outside the nine allowed values", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle", color: "gray" } }),
+    api,
+    (r) => responses.push(r),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: false, error: "invalid-request" },
+  ]);
+  assert.equal(api.calls.created.length, 0);
+});
+
+test("bounds group titles by code point, not UTF-16 code units", () => {
+  const broker = loadBroker();
+  const emojiTitle = "\u{1F600}".repeat(64);
+  assert.equal(emojiTitle.length, 128);
+  assert.equal([...emojiTitle].length, 64);
+  assert.deepEqual(JSON.parse(JSON.stringify(broker.safeGroup({ title: emojiTitle }))), {
+    title: emojiTitle,
+  });
+});
+
+test("bounds the toplevel title by code point, not UTF-16 code units", async () => {
+  const broker = loadBroker();
+  const emojiToplevel = "\u{1F600}".repeat(600);
+  assert.equal(emojiToplevel.length, 1200);
+  assert.equal([...emojiToplevel].length, 600);
+  const api = fakeBrowser();
+  api.tabs.query = async () => [
+    { id: 1, windowId: 10, active: true, title: emojiToplevel },
+  ];
+  const result = await broker.correlateWindow(api, `${emojiToplevel}${FF}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { windowId: 10 });
+});
+
+test("bounds the open url by code point, not UTF-16 code units", () => {
+  const broker = loadBroker();
+  const path = "\u{1F600}".repeat(2100);
+  const url = `https://example.com/${path}`;
+  assert.equal(url.length, 4220);
+  assert.equal([...url].length, 2120);
+  assert.notEqual(broker.safeOpenUrl(url), "");
+});
+
+test("reports create-failed and sends exactly one response when tabs.create throws", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  api.tabs.create = async () => {
+    throw new Error("boom");
+  };
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle" } }), api, (r) => responses.push(r),
+  );
+  await broker.groupsSettled();
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: false, error: "create-failed" },
+  ]);
 });
 
 test("passes the parsed href to tabs.create, not the raw string", async () => {
@@ -612,6 +695,7 @@ test("a failed group step still leaves the tab created and the answer ok", async
   );
   await broker.groupsSettled();
   assert.equal(responses[0].ok, true);
+  assert.equal(responses.length, 1);
   assert.equal(api.calls.created.length, 1);
 });
 
