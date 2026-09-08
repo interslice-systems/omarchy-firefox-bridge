@@ -117,8 +117,11 @@ assert_dispatch 'client:["activate","one"]' activate one
 assert_dispatch 'client:["activate","one","two","three"]' activate one two three
 assert_dispatch 'client:["open"]' open
 assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' unknown
-# Firefox's real invocation shape: the extension ID as $1.
-assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' omarchy-bridge@interslice.systems
+# Firefox's real invocation shape: the manifest path as $1, the extension ID
+# as $2.
+assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' \
+  /home/user/.mozilla/native-messaging-hosts/omarchy_firefox_bridge.json \
+  omarchy-bridge@interslice.systems
 
 cli_hostile_cwd=$temp_root/cli-hostile-cwd
 cli_hostile_marker=$temp_root/cli-hostile-imported
