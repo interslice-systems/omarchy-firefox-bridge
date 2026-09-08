@@ -3,8 +3,11 @@ set -euo pipefail
 
 lib_root=${OMARCHY_FIREFOX_BRIDGE_LIB_ROOT:-$HOME/.local/lib/omarchy-firefox-bridge}
 
-case $#:${1:-} in
-  1:tabs|3:activate)
+# Match on the verb alone, never the argument count: `open` has a variable
+# number of operands, and the fall-through branch launches a native host.
+# The client validates its own arity and reports invalid-request.
+case ${1:-} in
+  tabs|activate|open)
     export PYTHONPATH=$lib_root/src
     exec /usr/bin/python3 -P -m omarchy_firefox_bridge.client "$@"
     ;;

@@ -108,10 +108,14 @@ assert_dispatch() {
 assert_dispatch 'client:["tabs"]' tabs
 assert_dispatch 'client:["activate","not","numeric"]' activate not numeric
 assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>'
-assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' tabs extra
-assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' activate
-assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' activate one
-assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' activate one two three
+# The dispatcher matches on verb alone now, not verb-plus-argument-count, so
+# `tabs extra` reaches the client (which reports invalid-request) instead of
+# silently launching a native host.
+assert_dispatch 'client:["tabs","extra"]' tabs extra
+assert_dispatch 'client:["activate"]' activate
+assert_dispatch 'client:["activate","one"]' activate one
+assert_dispatch 'client:["activate","one","two","three"]' activate one two three
+assert_dispatch 'client:["open"]' open
 assert_dispatch 'sandbox:<omarchy_firefox_bridge.host>' unknown
 
 cli_hostile_cwd=$temp_root/cli-hostile-cwd
