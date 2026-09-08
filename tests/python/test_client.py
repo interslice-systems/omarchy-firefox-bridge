@@ -13,7 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from omarchy_firefox_bridge.client import main, request  # noqa: E402
+from omarchy_firefox_bridge.client import main, parse_command, request  # noqa: E402
 
 
 class ClientTest(unittest.TestCase):
@@ -269,6 +269,46 @@ class ClientTest(unittest.TestCase):
                     json.loads(output.getvalue()),
                     {"ok": False, "error": "unavailable"},
                 )
+
+
+class ParseOpenTests(unittest.TestCase):
+    def test_parses_a_minimal_open(self):
+        self.assertEqual(
+            parse_command(["open", "--toplevel-title", "T", "--url", "https://e.com/"]),
+            {"action": "open", "url": "https://e.com/", "toplevelTitle": "T"},
+        )
+
+    def test_parses_group_and_colour(self):
+        self.assertEqual(
+            parse_command([
+                "open", "--toplevel-title", "T", "--url", "https://e.com/",
+                "--group", "oracle", "--color", "yellow",
+            ]),
+            {
+                "action": "open",
+                "url": "https://e.com/",
+                "toplevelTitle": "T",
+                "group": {"title": "oracle", "color": "yellow"},
+            },
+        )
+
+    def test_rejects_bad_open_command_lines(self):
+        for argv in (
+            ["open"],
+            ["open", "--url", "https://e.com/"],
+            ["open", "--toplevel-title", "T"],
+            ["open", "--toplevel-title", "T", "--url"],
+            ["open", "--toplevel-title", "T", "--url", "https://e.com/", "--color", "red"],
+            ["open", "--toplevel-title", "T", "--url", "https://e.com/", "--bogus", "x"],
+            ["open", "--url", "a", "--url", "b", "--toplevel-title", "T"],
+            ["open", "https://e.com/"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                parse_command(argv)
+
+    def test_still_rejects_trailing_arguments_on_tabs(self):
+        with self.assertRaises(ValueError):
+            parse_command(["tabs", "extra"])
 
 
 if __name__ == "__main__":

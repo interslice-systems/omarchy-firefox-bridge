@@ -7,10 +7,12 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from omarchy_firefox_bridge.protocol import (  # noqa: E402
+    GROUP_COLORS,
     ProtocolError,
     snapshot_ids,
     valid_request_id,
     validate_activation,
+    validate_open_request,
     validate_snapshot,
 )
 
@@ -122,6 +124,101 @@ class ProtocolTest(unittest.TestCase):
         for values in ((True, 7), (4, False), (-1, 7), (0, 7), (4, 0), (4, "7")):
             with self.subTest(values=values), self.assertRaises(ProtocolError):
                 validate_activation(*values)
+
+
+def open_request(**changes):
+    value = {"url": "https://example.com/a", "toplevelTitle": "Page — Mozilla Firefox"}
+    value.update(changes)
+    return {key: item for key, item in value.items() if item is not None}
+
+
+class ValidateOpenRequestTests(unittest.TestCase):
+    def test_accepts_a_minimal_request(self):
+        self.assertEqual(
+            validate_open_request(open_request()),
+            {"url": "https://example.com/a", "toplevelTitle": "Page — Mozilla Firefox"},
+        )
+
+    def test_accepts_mixed_case_schemes(self):
+        result = validate_open_request(open_request(url="HtTpS://example.com/"))
+        self.assertEqual(result["url"], "HtTpS://example.com/")
+
+    def test_rejects_non_http_schemes(self):
+        for url in (
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "file:///etc/passwd",
+            "about:config",
+            "ftp://example.com/",
+            "//example.com/",
+        ):
+            with self.subTest(url=url), self.assertRaises(ProtocolError):
+                validate_open_request(open_request(url=url))
+
+    def test_rejects_control_characters_rather_than_normalising(self):
+        for url in ("https://example.com/\n", "https://exa\tmple.com/", "https://x.com/\x7f"):
+            with self.subTest(url=url), self.assertRaises(ProtocolError):
+                validate_open_request(open_request(url=url))
+
+    def test_rejects_lone_surrogates(self):
+        with self.assertRaises(ProtocolError):
+            validate_open_request(open_request(url="https://example.com/\ud800"))
+
+    def test_enforces_length_bounds_in_code_points(self):
+        validate_open_request(open_request(url="https://e.com/" + "a" * (4096 - 14)))
+        with self.assertRaises(ProtocolError):
+            validate_open_request(open_request(url="https://e.com/" + "a" * (4097 - 14)))
+
+    def test_accepts_four_byte_code_points_up_to_the_limit(self):
+        url = "https://e.com/" + "\U0001f600" * (4096 - 14)
+        self.assertEqual(validate_open_request(open_request(url=url))["url"], url)
+
+    def test_rejects_empty_or_missing_or_unknown_fields(self):
+        for value in (
+            {"url": "https://e.com/"},
+            {"toplevelTitle": "t"},
+            open_request(url=""),
+            {**open_request(), "extra": 1},
+            "not-a-dict",
+            None,
+        ):
+            with self.subTest(value=value), self.assertRaises(ProtocolError):
+                validate_open_request(value)
+
+    def test_accepts_a_group_with_and_without_colour(self):
+        self.assertEqual(
+            validate_open_request(open_request(group={"title": "oracle"}))["group"],
+            {"title": "oracle"},
+        )
+        self.assertEqual(
+            validate_open_request(
+                open_request(group={"title": "oracle", "color": "yellow"})
+            )["group"],
+            {"title": "oracle", "color": "yellow"},
+        )
+
+    def test_accepts_glob_characters_in_a_group_title(self):
+        # The JS side filters literally, so * and ? are data, not wildcards.
+        result = validate_open_request(open_request(group={"title": "we*rd?name"}))
+        self.assertEqual(result["group"]["title"], "we*rd?name")
+
+    def test_rejects_group_titles_outside_the_canonical_charset(self):
+        for title in ("has space", "has.dot", "has:colon", "has/slash", "has#hash", "", "a" * 65):
+            with self.subTest(title=title), self.assertRaises(ProtocolError):
+                validate_open_request(open_request(group={"title": title}))
+
+    def test_rejects_colours_outside_the_allowlist(self):
+        self.assertEqual(len(GROUP_COLORS), 9)
+        self.assertIn("grey", GROUP_COLORS)
+        self.assertNotIn("gray", GROUP_COLORS)
+        for color in ("gray", "chartreuse", "", 1, None):
+            with self.subTest(color=color), self.assertRaises(ProtocolError):
+                validate_open_request(open_request(group={"title": "oracle", "color": color}))
+
+    def test_rejects_group_with_unknown_or_missing_fields(self):
+        for group in ({"color": "red"}, {"title": "a", "extra": 1}, "oracle", 7):
+            with self.subTest(group=group), self.assertRaises(ProtocolError):
+                validate_open_request(open_request(group=group))
 
 
 if __name__ == "__main__":

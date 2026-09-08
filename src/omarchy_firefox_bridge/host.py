@@ -13,12 +13,17 @@ from .protocol import (
     snapshot_ids,
     valid_request_id,
     validate_activation,
+    validate_open_request,
     validate_snapshot,
 )
 from .socket_server import BridgeSocketServer, runtime_directory
 from .theme import read_theme_message, watch_theme
 
 EXTENSION_TIMEOUT = 0.4
+
+# Errors the extension may report for tabs.open. Anything else becomes
+# bridge-error, so an unexpected string cannot be relayed to the caller.
+OPEN_ERRORS = frozenset({"no-window", "ambiguous-window", "invalid-request", "create-failed"})
 
 
 def log(message: str) -> None:
@@ -126,6 +131,29 @@ class NativeBridge:
             if response.get("type") != "tabs.activated" or response.get("ok") is not True:
                 return {"ok": False, "error": "bridge-error"}
             return {"ok": True}
+        if action == "open" and frozenset(request) in (
+            frozenset({"action", "url", "toplevelTitle"}),
+            frozenset({"action", "url", "toplevelTitle", "group"}),
+        ):
+            try:
+                payload = validate_open_request(
+                    {key: value for key, value in request.items() if key != "action"}
+                )
+            except ProtocolError:
+                return {"ok": False, "error": "invalid-request"}
+            try:
+                result = self.request({"type": "tabs.open", **payload})
+            except ConnectionError:
+                return {"ok": False, "error": "unavailable"}
+            if result is None:
+                return {"ok": False, "error": "timeout"}
+            _, response = result
+            if response.get("type") != "tabs.opened":
+                return {"ok": False, "error": "bridge-error"}
+            if response.get("ok") is True:
+                return {"ok": True}
+            error = response.get("error")
+            return {"ok": False, "error": error if error in OPEN_ERRORS else "bridge-error"}
         return {"ok": False, "error": "invalid-request"}
 
 

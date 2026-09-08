@@ -3,8 +3,33 @@ set -euo pipefail
 
 lib_root=${OMARCHY_FIREFOX_BRIDGE_LIB_ROOT:-$HOME/.local/lib/omarchy-firefox-bridge}
 
-case $#:${1:-} in
-  1:tabs|3:activate)
+# Match on the verb alone, never the argument count.
+#
+# This deliberately reverts the dispatcher half of 75606b8 ("security: harden
+# Firefox sandbox launch contract"), which keyed on `$#:$1` so that only
+# `1:tabs` and `3:activate` reached the unsandboxed client and everything else
+# fell through to the bwrap'd host. That is structurally incompatible with
+# `open`, whose operand count varies with its optional flags: every routed link
+# would spawn a native host instead of running the client.
+#
+# Reviewed before reverting, and kept deliberately. What the arity check bought
+# was shape, not content -- parse_command already accepted arbitrary
+# attacker-shaped strings under the old rule (see the `activate not numeric`
+# case in tests/shell/test_sandbox.sh), and every field is re-validated by the
+# host's exact key-set check and validate_open_request. What it cost was real:
+# a typo'd `omarchy-firefox-bridge tabs --json` launched a real native host that
+# binds the socket and blocks on the terminal's stdin.
+#
+# The substance of 75606b8 -- the bwrap contract in libexec/, the runtime
+# directory validation, and sandbox_probe.py -- is untouched.
+#
+# Verified over a full argv matrix: every routing difference moves host ->
+# client, never client -> host, and Firefox's own invocation (manifest path
+# plus extension id) matches no verb under either pattern.
+#
+# The client validates its own arity and reports invalid-request.
+case ${1:-} in
+  tabs|activate|open)
     export PYTHONPATH=$lib_root/src
     exec /usr/bin/python3 -P -m omarchy_firefox_bridge.client "$@"
     ;;

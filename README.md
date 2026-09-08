@@ -103,9 +103,12 @@ disconnects or Firefox exits. There is no systemd service, daemon, pidfile, or
 persistent tab database.
 
 The native-host manifest points at `~/.local/bin/omarchy-firefox-bridge`.
-Firefox supplies the manifest path and extension ID as process arguments; the
-executable treats only `tabs` and `activate` as CLI subcommands and sends all
-other invocations into native-host mode.
+Firefox supplies the manifest path and extension ID as process arguments. The
+executable dispatches on the first argument alone: `tabs`, `activate`, and
+`open` are CLI subcommands regardless of how many further arguments follow
+(the client itself validates arity and reports `invalid-request` on a bad
+command line), and every other first argument -- including the extension ID
+Firefox actually passes -- enters native-host mode.
 
 Native-host mode enters Bubblewrap with:
 
@@ -218,18 +221,35 @@ $XDG_RUNTIME_DIR/omarchy-firefox-bridge/bridge.sock
 
 The directory is mode `0700`; the socket is mode `0600`. Each connection sends
 one newline-terminated JSON request and receives one newline-terminated JSON
-response. A request is capped at 4,096 bytes including its terminating newline.
+response. A request is capped at 24,576 bytes including its terminating
+newline, sized to accommodate a 4,096-code-point URL in 4-byte UTF-8 plus a
+1,024-code-point window title.
 
 ```bash
 omarchy-firefox-bridge tabs
 omarchy-firefox-bridge activate 456 123
+omarchy-firefox-bridge open --toplevel-title T --url https://example.com/
+omarchy-firefox-bridge open --toplevel-title T --url https://example.com/ \
+  --group oracle --color yellow
 ```
+
+`open` correlates `--toplevel-title` against an existing Firefox window title,
+creates a tab there for `--url`, and optionally files it into a tab group
+named by `--group` (created if it does not already exist), coloured by
+`--color`. `--color` requires `--group`.
+
+`url` is 1-4,096 code points; `toplevelTitle` is 1-1,024 code points;
+`group.title` is 1-64 code points. `group.color` is one of `blue`, `cyan`,
+`grey`, `green`, `orange`, `pink`, `purple`, `red`, `yellow` (note `grey`, not
+`gray`).
 
 Requests:
 
 ```json
 {"action":"tabs"}
 {"action":"activate","windowId":456,"tabId":123}
+{"action":"open","url":"https://example.com/","toplevelTitle":"T"}
+{"action":"open","url":"https://example.com/","toplevelTitle":"T","group":{"title":"oracle","color":"yellow"}}
 ```
 
 Responses:
@@ -242,7 +262,16 @@ Responses:
 {"ok":false,"error":"invalid-request"}
 {"ok":false,"error":"stale-tab"}
 {"ok":false,"error":"bridge-error"}
+{"ok":false,"error":"no-window"}
+{"ok":false,"error":"ambiguous-window"}
+{"ok":false,"error":"create-failed"}
 ```
+
+`no-window`, `ambiguous-window`, and `create-failed` are reported only for
+`open`: no window matched `--toplevel-title`, more than one did, or the
+extension's `tabs.create` call failed. Any extension error string outside
+that allowlist is relayed as `bridge-error` rather than passed through
+verbatim.
 
 Exit `0` means success, `2` means invalid CLI input, and `3` means the bridge
 was unavailable or rejected the operation. Missing sockets fail immediately;

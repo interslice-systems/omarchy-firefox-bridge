@@ -18,6 +18,13 @@ from omarchy_firefox_bridge.socket_server import BridgeSocketServer  # noqa: E40
 
 
 class SocketServerTest(unittest.TestCase):
+    def test_accepts_a_request_at_the_documented_budget(self):
+        from omarchy_firefox_bridge.socket_server import MAX_CLIENT_REQUEST
+
+        # 4096 four-byte code points + 1024 four-byte title + fields must fit.
+        self.assertGreaterEqual(MAX_CLIENT_REQUEST, 4096 * 4 + 1024 * 4 + 64 * 4 + 300)
+        self.assertEqual(MAX_CLIENT_REQUEST, 24576)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.xdg_runtime = Path(self.temp.name) / "xdg-runtime"

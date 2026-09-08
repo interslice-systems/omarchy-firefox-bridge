@@ -395,5 +395,83 @@ class NativeHostStartupTest(unittest.TestCase):
         self.assertFalse(server.handler.__self__.connected)
 
 
+class OpenActionTests(unittest.TestCase):
+    def setUp(self):
+        self.writer = RecordingWriter()
+
+    def handle(self, request, response):
+        bridge = NativeBridge(self.writer, timeout=0.05)
+        bridge.request = lambda message: (1, response) if response is not None else None
+        return bridge.handle_client(request)
+
+    def test_forwards_a_valid_open_and_reports_success(self):
+        sent = {}
+        bridge = NativeBridge(self.writer, timeout=0.05)
+
+        def capture(message):
+            sent.update(message)
+            return (1, {"type": "tabs.opened", "ok": True, "tabId": 5})
+
+        bridge.request = capture
+        result = bridge.handle_client({
+            "action": "open",
+            "url": "https://e.com/",
+            "toplevelTitle": "T",
+            "group": {"title": "oracle", "color": "yellow"},
+        })
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(sent["type"], "tabs.open")
+        self.assertEqual(sent["group"], {"title": "oracle", "color": "yellow"})
+        self.assertNotIn("action", sent)
+
+    def test_rejects_an_invalid_open_without_contacting_the_extension(self):
+        bridge = NativeBridge(self.writer, timeout=0.05)
+
+        def explode(message):
+            raise AssertionError("must not reach the extension")
+
+        bridge.request = explode
+        self.assertEqual(
+            bridge.handle_client({"action": "open", "url": "file:///x", "toplevelTitle": "T"}),
+            {"ok": False, "error": "invalid-request"},
+        )
+
+    def test_passes_through_only_allowlisted_extension_errors(self):
+        for error, expected in (
+            ("no-window", "no-window"),
+            ("ambiguous-window", "ambiguous-window"),
+            ("invalid-request", "invalid-request"),
+            ("create-failed", "create-failed"),
+            ("something-invented", "bridge-error"),
+            (None, "bridge-error"),
+        ):
+            with self.subTest(error=error):
+                response = {"type": "tabs.opened", "ok": False, "error": error}
+                self.assertEqual(
+                    self.handle(
+                        {"action": "open", "url": "https://e.com/", "toplevelTitle": "T"},
+                        response,
+                    ),
+                    {"ok": False, "error": expected},
+                )
+
+    def test_reports_timeout_when_the_extension_does_not_answer(self):
+        self.assertEqual(
+            self.handle(
+                {"action": "open", "url": "https://e.com/", "toplevelTitle": "T"}, None
+            ),
+            {"ok": False, "error": "timeout"},
+        )
+
+    def test_rejects_unknown_keys_on_the_open_action(self):
+        self.assertEqual(
+            self.handle(
+                {"action": "open", "url": "https://e.com/", "toplevelTitle": "T", "x": 1},
+                {"type": "tabs.opened", "ok": True},
+            ),
+            {"ok": False, "error": "invalid-request"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

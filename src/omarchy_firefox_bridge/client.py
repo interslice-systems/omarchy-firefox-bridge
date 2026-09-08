@@ -15,6 +15,16 @@ BRIDGE_ERROR = {"ok": False, "error": "bridge-error"}
 UNAVAILABLE = {"ok": False, "error": "unavailable"}
 TIMEOUT = {"ok": False, "error": "timeout"}
 INVALID_REQUEST = {"ok": False, "error": "invalid-request"}
+OPEN_FLAGS = {
+    "--toplevel-title": "toplevelTitle",
+    "--url": "url",
+    "--group": "group",
+    "--color": "color",
+}
+OPEN_USAGE = (
+    "usage: omarchy-firefox-bridge open --toplevel-title T --url U "
+    "[--group G [--color C]]"
+)
 
 
 def _reject_json_constant(constant: str) -> None:
@@ -101,7 +111,38 @@ def _ascii_decimal(value: object) -> bool:
     )
 
 
+def _parse_open(argv: list[str]) -> dict:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(argv):
+        flag = argv[index]
+        if flag not in OPEN_FLAGS or index + 1 >= len(argv):
+            raise ValueError(OPEN_USAGE)
+        key = OPEN_FLAGS[flag]
+        if key in values:
+            raise ValueError(f"{flag} given more than once")
+        values[key] = argv[index + 1]
+        index += 2
+    if "toplevelTitle" not in values or "url" not in values:
+        raise ValueError(OPEN_USAGE)
+    if "color" in values and "group" not in values:
+        raise ValueError("--color requires --group")
+    message = {
+        "action": "open",
+        "url": values["url"],
+        "toplevelTitle": values["toplevelTitle"],
+    }
+    if "group" in values:
+        group = {"title": values["group"]}
+        if "color" in values:
+            group["color"] = values["color"]
+        message["group"] = group
+    return message
+
+
 def parse_command(argv: list[str]) -> dict:
+    if argv and argv[0] == "open":
+        return _parse_open(argv[1:])
     if argv == ["tabs"]:
         return {"action": "tabs"}
     if len(argv) == 3 and argv[0] == "activate":
@@ -112,7 +153,10 @@ def parse_command(argv: list[str]) -> dict:
         if window_id <= 0 or tab_id <= 0:
             raise ValueError("IDs must be positive integers")
         return {"action": "activate", "windowId": window_id, "tabId": tab_id}
-    raise ValueError("usage: omarchy-firefox-bridge tabs|activate <windowId> <tabId>")
+    raise ValueError(
+        "usage: omarchy-firefox-bridge tabs|activate <windowId> <tabId>|"
+        "open --toplevel-title T --url U [--group G [--color C]]"
+    )
 
 
 def emit(response: dict) -> bool:

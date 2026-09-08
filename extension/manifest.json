@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Omarchy Bridge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bridges the Omarchy desktop theme and local Firefox tabs.",
   "incognito": "not_allowed",
   "browser_specific_settings": {
@@ -13,7 +13,7 @@
       }
     }
   },
-  "permissions": ["theme", "nativeMessaging", "alarms", "tabs"],
+  "permissions": ["theme", "nativeMessaging", "alarms", "tabs", "tabGroups"],
   "background": {
     "scripts": ["broker.js", "background.js"]
   },

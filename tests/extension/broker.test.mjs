@@ -433,3 +433,303 @@ test("discards work and disconnects from stale native ports", async () => {
   alarmEvent.emit({ name: "reconnect" });
   assert.equal(connections, 3);
 });
+
+
+const FF = " — Mozilla Firefox";
+
+function fakeBrowser() {
+  const calls = { created: [], grouped: [], updated: [], queried: [] };
+  return {
+    calls,
+    tabs: {
+      query: async () => [
+        { id: 1, windowId: 10, active: true, title: "Alpha" },
+        { id: 2, windowId: 20, active: true, title: "Beta" },
+      ],
+      create: async ({ windowId, url, active }) => {
+        calls.created.push({ windowId, url, active });
+        return { id: 99, windowId };
+      },
+      group: async (options) => {
+        calls.grouped.push(options);
+        return 500;
+      },
+    },
+    tabGroups: {
+      query: async (filter) => {
+        calls.queried.push(filter);
+        return [];
+      },
+      update: async (groupId, properties) => {
+        calls.updated.push({ groupId, properties });
+      },
+    },
+  };
+}
+
+function openMessage(changes = {}) {
+  return {
+    type: "tabs.open",
+    requestId: "r1",
+    toplevelTitle: `Alpha${FF}`,
+    url: "https://example.com/a",
+    ...changes,
+  };
+}
+
+test("creates a tab in the correlated window and answers before grouping", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  let releaseGroupQuery;
+  const groupQueryGate = new Promise((resolve) => {
+    releaseGroupQuery = resolve;
+  });
+  api.tabGroups.query = async (filter) => {
+    api.calls.queried.push(filter);
+    await groupQueryGate;
+    return [];
+  };
+  const responses = [];
+  const handled = broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle", color: "yellow" } }),
+    api,
+    (response) => responses.push(response),
+  );
+  await handled;
+  // The response must land before grouping does any work at all -- not just
+  // before it finishes. tabGroups.query above is gated shut, so if the
+  // implementation awaited the whole grouping chain before responding, this
+  // assertion would hang or see zero responses instead of one.
+  assert.equal(responses.length, 1);
+  assert.deepEqual(api.calls.created, [
+    { windowId: 10, url: "https://example.com/a", active: true },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: true, tabId: 99 },
+  ]);
+  assert.equal(responses[0].groupId, undefined);
+  releaseGroupQuery();
+  await broker.groupsSettled();
+  assert.deepEqual(JSON.parse(JSON.stringify(api.calls.updated)), [
+    { groupId: 500, properties: { title: "oracle", color: "yellow" } },
+  ]);
+});
+
+test("refuses a group colour outside the nine allowed values", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle", color: "gray" } }),
+    api,
+    (r) => responses.push(r),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: false, error: "invalid-request" },
+  ]);
+  assert.equal(api.calls.created.length, 0);
+});
+
+test("bounds group titles by code point, not UTF-16 code units", () => {
+  const broker = loadBroker();
+  const emojiTitle = "\u{1F600}".repeat(64);
+  assert.equal(emojiTitle.length, 128);
+  assert.equal([...emojiTitle].length, 64);
+  assert.deepEqual(JSON.parse(JSON.stringify(broker.safeGroup({ title: emojiTitle }))), {
+    title: emojiTitle,
+  });
+});
+
+test("bounds the toplevel title by code point, not UTF-16 code units", async () => {
+  const broker = loadBroker();
+  const emojiToplevel = "\u{1F600}".repeat(600);
+  assert.equal(emojiToplevel.length, 1200);
+  assert.equal([...emojiToplevel].length, 600);
+  const api = fakeBrowser();
+  api.tabs.query = async () => [
+    { id: 1, windowId: 10, active: true, title: emojiToplevel },
+  ];
+  const result = await broker.correlateWindow(api, `${emojiToplevel}${FF}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { windowId: 10 });
+});
+
+test("bounds the open url by code point, not UTF-16 code units", () => {
+  const broker = loadBroker();
+  const path = "\u{1F600}".repeat(2100);
+  const url = `https://example.com/${path}`;
+  assert.equal(url.length, 4220);
+  assert.equal([...url].length, 2120);
+  assert.notEqual(broker.safeOpenUrl(url), "");
+});
+
+test("reports create-failed and sends exactly one response when tabs.create throws", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  api.tabs.create = async () => {
+    throw new Error("boom");
+  };
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle" } }), api, (r) => responses.push(r),
+  );
+  await broker.groupsSettled();
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: false, error: "create-failed" },
+  ]);
+});
+
+test("passes the parsed href to tabs.create, not the raw string", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  await broker.handleNativeMessage(
+    openMessage({ url: "HTTPS://Example.COM/a" }), api, () => {},
+  );
+  assert.equal(api.calls.created[0].url, new URL("HTTPS://Example.COM/a").href);
+  assert.notEqual(api.calls.created[0].url, "HTTPS://Example.COM/a");
+});
+
+test("refuses non-http schemes and malformed urls", async () => {
+  const broker = loadBroker();
+  for (const url of [
+    "javascript:alert(1)",
+    "data:text/html,x",
+    "file:///etc/passwd",
+    "about:config",
+    "nonsense",
+    "",
+  ]) {
+    const responses = [];
+    await broker.handleNativeMessage(
+      openMessage({ url }), fakeBrowser(), (r) => responses.push(r),
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+      { type: "tabs.opened", requestId: "r1", ok: false, error: "invalid-request" },
+    ]);
+  }
+});
+
+test("refuses urls containing control characters", async () => {
+  const broker = loadBroker();
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ url: "https://example.com/\u000a" }), fakeBrowser(), (r) => responses.push(r),
+  );
+  assert.equal(responses[0].error, "invalid-request");
+});
+
+test("refuses a group title containing a control character", async () => {
+  const broker = loadBroker();
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: `oracle${String.fromCharCode(10)}` } }),
+    fakeBrowser(),
+    (r) => responses.push(r),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+    { type: "tabs.opened", requestId: "r1", ok: false, error: "invalid-request" },
+  ]);
+});
+
+test("reports no-window and ambiguous-window without creating a tab", async () => {
+  const broker = loadBroker();
+
+  const none = fakeBrowser();
+  let responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ toplevelTitle: `Nothing${FF}` }), none, (r) => responses.push(r),
+  );
+  assert.equal(responses[0].error, "no-window");
+  assert.equal(none.calls.created.length, 0);
+
+  const duplicate = fakeBrowser();
+  duplicate.tabs.query = async () => [
+    { id: 1, windowId: 10, active: true, title: "Alpha" },
+    { id: 3, windowId: 30, active: true, title: "Alpha" },
+  ];
+  responses = [];
+  await broker.handleNativeMessage(openMessage(), duplicate, (r) => responses.push(r));
+  assert.equal(responses[0].error, "ambiguous-window");
+  assert.equal(duplicate.calls.created.length, 0);
+});
+
+test("never passes a title to tabGroups.query, so globs cannot match", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  api.tabGroups.query = async (filter) => {
+    api.calls.queried.push(filter);
+    return [{ id: 7, title: "weird", windowId: 10 }];
+  };
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "we*rd" } }), api, () => {},
+  );
+  await broker.groupsSettled();
+  assert.deepEqual(JSON.parse(JSON.stringify(api.calls.queried)), [{ windowId: 10 }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.calls.grouped)), [
+    { tabIds: 99, createProperties: { windowId: 10 } },
+  ]);
+});
+
+test("reuses exactly one same-titled group and leaves several ambiguous", async () => {
+  const broker = loadBroker();
+
+  const one = fakeBrowser();
+  one.tabGroups.query = async () => [
+    { id: 7, title: "oracle", windowId: 10 },
+    { id: 8, title: "other", windowId: 10 },
+  ];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle" } }), one, () => {},
+  );
+  await broker.groupsSettled();
+  assert.deepEqual(JSON.parse(JSON.stringify(one.calls.grouped)), [{ tabIds: 99, groupId: 7 }]);
+  assert.deepEqual(one.calls.updated, []);
+
+  const several = fakeBrowser();
+  several.tabGroups.query = async () => [
+    { id: 7, title: "oracle", windowId: 10 },
+    { id: 8, title: "oracle", windowId: 10 },
+  ];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle" } }), several, () => {},
+  );
+  await broker.groupsSettled();
+  assert.deepEqual(several.calls.grouped, []);
+});
+
+test("a failed group step still leaves the tab created and the answer ok", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  api.tabs.group = async () => {
+    throw new Error("boom");
+  };
+  const responses = [];
+  await broker.handleNativeMessage(
+    openMessage({ group: { title: "oracle" } }), api, (r) => responses.push(r),
+  );
+  await broker.groupsSettled();
+  assert.equal(responses[0].ok, true);
+  assert.equal(responses.length, 1);
+  assert.equal(api.calls.created.length, 1);
+});
+
+test("serialises concurrent opens so one group is created, not two", async () => {
+  const broker = loadBroker();
+  const api = fakeBrowser();
+  const groups = [];
+  api.tabGroups.query = async () => groups.slice();
+  api.tabs.group = async (options) => {
+    api.calls.grouped.push(options);
+    if (options.createProperties) {
+      groups.push({ id: 500, title: "oracle", windowId: 10 });
+      return 500;
+    }
+    return options.groupId;
+  };
+  await Promise.all([
+    broker.handleNativeMessage(openMessage({ group: { title: "oracle" } }), api, () => {}),
+    broker.handleNativeMessage(openMessage({ group: { title: "oracle" } }), api, () => {}),
+  ]);
+  await broker.groupsSettled();
+  const created = api.calls.grouped.filter((call) => call.createProperties);
+  assert.equal(created.length, 1);
+});
