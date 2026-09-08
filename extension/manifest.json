@@ -13,7 +13,7 @@
       }
     }
   },
-  "permissions": ["theme", "nativeMessaging", "alarms", "tabs"],
+  "permissions": ["theme", "nativeMessaging", "alarms", "tabs", "tabGroups"],
   "background": {
     "scripts": ["broker.js", "background.js"]
   },

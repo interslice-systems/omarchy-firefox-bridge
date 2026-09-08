@@ -22,6 +22,7 @@ test("declares exactly the approved capabilities and data use", () => {
     "nativeMessaging",
     "alarms",
     "tabs",
+    "tabGroups",
   ]);
   assert.deepEqual(
     manifest.browser_specific_settings.gecko.data_collection_permissions.required,
@@ -40,4 +41,14 @@ test("locks extension pages to packaged scripts and no network sinks", () => {
   assert.match(csp, /frame-src 'none'/);
   assert.match(csp, /form-action 'none'/);
   assert.deepEqual(manifest.background.scripts, ["broker.js", "background.js"]);
+});
+
+test("declares exactly the five expected permissions", async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL("../../extension/manifest.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(manifest.permissions.slice().sort(), [
+    "alarms", "nativeMessaging", "tabGroups", "tabs", "theme",
+  ]);
+  assert.equal(manifest.browser_specific_settings.gecko.strict_min_version, "142.0");
 });
