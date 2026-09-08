@@ -440,6 +440,7 @@ class OpenActionTests(unittest.TestCase):
         for error, expected in (
             ("no-window", "no-window"),
             ("ambiguous-window", "ambiguous-window"),
+            ("invalid-request", "invalid-request"),
             ("create-failed", "create-failed"),
             ("something-invented", "bridge-error"),
             (None, "bridge-error"),
