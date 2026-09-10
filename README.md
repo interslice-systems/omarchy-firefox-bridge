@@ -9,6 +9,11 @@ The extension is named **Omarchy Bridge**. Its Gecko ID is
 `omarchy-bridge@interslice.systems`; its native-host name is
 `omarchy_firefox_bridge`.
 
+Source: <https://github.com/interslice-systems/omarchy-firefox-bridge>. Built
+for one desk. Shared in case it's useful on yours. No warranty, no promises,
+no roadmap — but if it breaks in an interesting way, an issue is welcome.
+MIT licensed; see `LICENSE`.
+
 ## Requirements
 
 - Omarchy 4
